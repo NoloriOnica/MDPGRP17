@@ -1,0 +1,5 @@
+{
+  "name": "Dubins Path Simulator",
+  "description": "A sophisticated path-planning simulator using Dubins curves and TSP heuristics to navigate a robot through obstacles and waypoints.",
+  "requestFramePermissions": []
+}
