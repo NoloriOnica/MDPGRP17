@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="imageID_array">
+        <item>OB0</item>
+        <item>OB1</item>
+        <item>OB2</item>
+        <item>OB3</item>
+        <item>OB4</item>
+        <item>OB5</item>
+        <item>OB6</item>
+        <item>OB7</item>
+        <item>OB8</item>
+
+    </string-array>
+
+    <string-array name="imageBearing_array">
+        <item>North</item>
+        <item>South</item>
+        <item>East</item>
+        <item>West</item>
+    </string-array>
+</resources>

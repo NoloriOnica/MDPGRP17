@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@drawable/border_black"
+        android:padding="4dp" />
+    <item android:drawable="@drawable/toggle_selector" />
+</layer-list>

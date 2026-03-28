@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="save_map_array">
+        <item>Map 1</item>
+        <item>Map 2</item>
+        <item>Map 3</item>
+        <item>Map 4</item>
+        <item>Map 5</item>
+        <item>Map 6</item>
+        <item>Map 7</item>
+        <item>Map 8</item>
+        <item>Map 9</item>
+        <item>Map 10</item>
+        <item>Competition Map</item>
+    </string-array>
+</resources>
