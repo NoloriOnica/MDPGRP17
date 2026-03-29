@@ -1,0 +1,1521 @@
+from __future__ import annotations
+
+import heapq
+import math
+from typing import Any, Dict, List, Literal, Optional, Tuple
+
+Point = Tuple[float, float, float]
+Rect = Tuple[float, float, float, float]
+Direction = Literal["N", "S", "E", "W"]
+
+X_MIN = 0.0
+X_MAX = 200.0
+Y_MIN = 0.0
+Y_MAX = 200.0
+BOUNDARY_EPS = 1e-6
+DEFAULT_LEFT_TURN_RADIUS = 13.5
+DEFAULT_RIGHT_TURN_RADIUS = 17.0
+DEFAULT_REAR_TRACK = 19.0
+DEFAULT_RADIUS = (DEFAULT_LEFT_TURN_RADIUS + DEFAULT_RIGHT_TURN_RADIUS) / 2
+DEFAULT_ALGORITHM = "legacy"
+DEFAULT_START_POSE: Point = (0.0, 0.0, math.pi / 2)
+DEFAULT_APPROACH_OFFSET = 30.0
+DEFAULT_SAFETY_BUFFER = 2.0
+DEFAULT_VEHICLE_LENGTH = 20.0
+DEFAULT_VEHICLE_WIDTH = 20.0
+FRONT_TO_BACK_WHEEL_MARGIN = 2.0
+PHYSICAL_OBSTACLE_SIZE = 10.0
+BACKTRACK_WINDOW = 3
+BACKTRACK_PENALTY = 0.15
+BEAM_WIDTH = 8
+MAX_BRANCHING_PER_STATE = 6
+REMAINING_HEURISTIC_WEIGHT = 0.35
+UNREACHABLE_EDGE_PENALTY = 250.0
+LOOK_BACK_LIMIT = 60.0
+LOOK_BACK_SAMPLE_STEP = 5.0
+MOTION_EPS = 1e-6
+ORDER_PREFERENCE_WEIGHT = 2.0
+COMPLETENESS_CONNECTIVITY_BONUS = 6.0
+ASTAR_REVERSE_MOTION_PENALTY = 6.0
+ASTAR_MOTION_SWITCH_PENALTY = 1.5
+ASTAR_DIRECTION_SWITCH_PENALTY = 6.0
+ASTAR_STEERING_FLIP_PENALTY = 2.0
+REALISTIC_HEADING_TOLERANCE_DEG = 8.0
+
+
+def mod2pi(theta: float) -> float:
+    return theta - 2.0 * math.pi * math.floor(theta / (2.0 * math.pi))
+
+
+def euclidean(p: Point, q: Point) -> float:
+    return math.hypot(p[0] - q[0], p[1] - q[1])
+
+
+def within_bounds(x: float, y: float) -> bool:
+    return (
+        X_MIN - BOUNDARY_EPS <= x <= X_MAX + BOUNDARY_EPS
+        and Y_MIN - BOUNDARY_EPS <= y <= Y_MAX + BOUNDARY_EPS
+    )
+
+
+def sample_dubins_path(
+    q0: Point,
+    path_type: str,
+    segments: Tuple[float, float, float],
+    radius: float,
+    step: float = 1.0,
+) -> List[Point]:
+    x, y, theta = q0
+    samples: List[Point] = [(x, y, theta)]
+    motions = list(path_type)
+
+    for i, motion in enumerate(motions):
+        seg = segments[i]
+        length = seg * radius
+        traveled = 0.0
+
+        while traveled < length:
+            ds = min(step, length - traveled)
+
+            if motion == "S":
+                x += ds * math.cos(theta)
+                y += ds * math.sin(theta)
+            elif motion == "L":
+                dtheta = ds / radius
+                theta_start = theta
+                theta += dtheta
+                x += radius * (math.sin(theta) - math.sin(theta_start))
+                y -= radius * (math.cos(theta) - math.cos(theta_start))
+            elif motion == "R":
+                dtheta = ds / radius
+                theta_start = theta
+                theta -= dtheta
+                x += radius * (math.sin(theta_start) - math.sin(theta))
+                y += radius * (math.cos(theta) - math.cos(theta_start))
+
+            traveled += ds
+            samples.append((x, y, theta))
+
+    return samples
+
+
+def point_in_rect(x: float, y: float, rect: Rect) -> bool:
+    xmin, xmax, ymin, ymax = rect
+    return xmin <= x <= xmax and ymin <= y <= ymax
+
+
+def path_collides(points: List[Point], obstacles: List[Rect]) -> bool:
+    for px, py, _ in points:
+        for obstacle in obstacles:
+            if point_in_rect(px, py, obstacle):
+                return True
+    return False
+
+
+def path_out_of_bounds(points: List[Point]) -> bool:
+    for px, py, _ in points:
+        if not within_bounds(px, py):
+            return True
+    return False
+
+
+def lsl(alpha: float, beta: float, d: float) -> Optional[Tuple[float, float, float]]:
+    tmp = d + math.sin(alpha) - math.sin(beta)
+    p_sq = 2 + d * d - 2 * math.cos(alpha - beta) + 2 * d * (math.sin(alpha) - math.sin(beta))
+    if p_sq < 0:
+        return None
+    p = math.sqrt(p_sq)
+    t = mod2pi(-alpha + math.atan2(math.cos(beta) - math.cos(alpha), tmp))
+    q = mod2pi(beta - math.atan2(math.cos(beta) - math.cos(alpha), tmp))
+    return (t, p, q)
+
+
+def rsr(alpha: float, beta: float, d: float) -> Optional[Tuple[float, float, float]]:
+    tmp = d - math.sin(alpha) + math.sin(beta)
+    p_sq = 2 + d * d - 2 * math.cos(alpha - beta) + 2 * d * (math.sin(beta) - math.sin(alpha))
+    if p_sq < 0:
+        return None
+    p = math.sqrt(p_sq)
+    t = mod2pi(alpha - math.atan2(math.cos(alpha) - math.cos(beta), tmp))
+    q = mod2pi(-beta + math.atan2(math.cos(alpha) - math.cos(beta), tmp))
+    return (t, p, q)
+
+
+def lsr(alpha: float, beta: float, d: float) -> Optional[Tuple[float, float, float]]:
+    sa = math.sin(alpha)
+    sb = math.sin(beta)
+    ca = math.cos(alpha)
+    cb = math.cos(beta)
+    c_ab = math.cos(alpha - beta)
+    p_sq = -2 + d * d + 2 * c_ab + 2 * d * (sa + sb)
+    if p_sq < 0:
+        return None
+    p = math.sqrt(p_sq)
+    tmp2 = math.atan2((-ca - cb), (d + sa + sb)) - math.atan2(-2.0, p)
+    t = mod2pi(-alpha + tmp2)
+    q = mod2pi(-mod2pi(beta) + tmp2)
+    return (t, p, q)
+
+
+def rsl(alpha: float, beta: float, d: float) -> Optional[Tuple[float, float, float]]:
+    sa = math.sin(alpha)
+    sb = math.sin(beta)
+    ca = math.cos(alpha)
+    cb = math.cos(beta)
+    c_ab = math.cos(alpha - beta)
+    p_sq = d * d - 2 + 2 * c_ab - 2 * d * (sa + sb)
+    if p_sq < 0:
+        return None
+    p = math.sqrt(p_sq)
+    tmp2 = math.atan2((ca + cb), (d - sa - sb)) - math.atan2(2.0, p)
+    t = mod2pi(alpha - tmp2)
+    q = mod2pi(mod2pi(beta) - tmp2)
+    return (t, p, q)
+
+
+def rlr(alpha: float, beta: float, d: float) -> Optional[Tuple[float, float, float]]:
+    tmp = (6.0 - d * d + 2.0 * math.cos(alpha - beta) + 2.0 * d * (math.sin(alpha) - math.sin(beta))) / 8.0
+    if abs(tmp) > 1:
+        return None
+    p = mod2pi(math.acos(tmp))
+    t = mod2pi(alpha - math.atan2(math.cos(alpha) - math.cos(beta), d - math.sin(alpha) + math.sin(beta)) + p / 2.0)
+    q = mod2pi(alpha - beta - t + p)
+    return (t, p, q)
+
+
+def lrl(alpha: float, beta: float, d: float) -> Optional[Tuple[float, float, float]]:
+    tmp = (6.0 - d * d + 2.0 * math.cos(alpha - beta) + 2.0 * d * (math.sin(beta) - math.sin(alpha))) / 8.0
+    if abs(tmp) > 1:
+        return None
+    p = mod2pi(math.acos(tmp))
+    t = mod2pi(-alpha - math.atan2(math.cos(alpha) - math.cos(beta), d + math.sin(alpha) - math.sin(beta)) + p / 2.0)
+    q = mod2pi(beta - alpha - t + p)
+    return (t, p, q)
+
+
+def find_valid_dubins_path(
+    q0: Point, q1: Point, radius: float, obstacles: List[Rect]
+) -> Optional[Tuple[str, Tuple[float, float, float], float]]:
+    dx = q1[0] - q0[0]
+    dy = q1[1] - q0[1]
+    d = math.hypot(dx, dy) / radius
+    angle = math.atan2(dy, dx)
+    alpha = mod2pi(q0[2] - angle)
+    beta = mod2pi(q1[2] - angle)
+
+    candidates: Dict[str, Optional[Tuple[float, float, float]]] = {
+        "LSL": lsl(alpha, beta, d),
+        "RSR": rsr(alpha, beta, d),
+        "LSR": lsr(alpha, beta, d),
+        "RSL": rsl(alpha, beta, d),
+        "RLR": rlr(alpha, beta, d),
+        "LRL": lrl(alpha, beta, d),
+    }
+
+    best: Optional[Tuple[str, Tuple[float, float, float], float]] = None
+    min_length = float("inf")
+
+    for path_type, segs in candidates.items():
+        if segs is None:
+            continue
+        samples = sample_dubins_path(q0, path_type, segs, radius, 1.0)
+        if path_collides(samples, obstacles):
+            continue
+        if path_out_of_bounds(samples):
+            continue
+
+        length = (segs[0] + segs[1] + segs[2]) * radius
+        if length < min_length:
+            min_length = length
+            best = (path_type, segs, length)
+
+    return best
+
+
+def segments_to_commands(
+    path_type: str, segments: Tuple[float, float, float], radius: float
+) -> List[Dict[str, Any]]:
+    commands: List[Dict[str, Any]] = []
+    motions = list(path_type)
+
+    for i, motion in enumerate(motions):
+        seg = segments[i]
+        dist = seg * radius
+        if seg <= 0.001:
+            continue
+
+        if motion == "L":
+            degrees = (dist / radius) * (180 / math.pi)
+            commands.append({"type": "LEFT", "value": max(1, round(degrees))})
+        elif motion == "R":
+            degrees = (dist / radius) * (180 / math.pi)
+            commands.append({"type": "RIGHT", "value": max(1, round(degrees))})
+        elif motion == "S":
+            commands.append({"type": "FORWARD", "value": round(dist, 1)})
+
+    return commands
+
+
+def invert_movement_commands(commands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    reversed_commands: List[Dict[str, Any]] = []
+    for command in reversed(commands):
+        motion = command.get("type")
+        value = command.get("value")
+        if motion == "FORWARD":
+            reversed_commands.append({"type": "BACKWARD", "value": value})
+        elif motion in {"BACKWARD", "REVERSE"}:
+            reversed_commands.append({"type": "FORWARD", "value": value})
+        elif motion == "LEFT":
+            reversed_commands.append({"type": "BACKLEFT", "value": value})
+        elif motion == "RIGHT":
+            reversed_commands.append({"type": "BACKRIGHT", "value": value})
+        elif motion == "BACKLEFT":
+            reversed_commands.append({"type": "LEFT", "value": value})
+        elif motion == "BACKRIGHT":
+            reversed_commands.append({"type": "RIGHT", "value": value})
+    return reversed_commands
+
+
+def command_travel_distance(command: Dict[str, Any], radius: float) -> float:
+    motion = str(command.get("type", "")).upper()
+    try:
+        value = abs(float(command.get("value", 0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+    if motion in {"FORWARD", "BACKWARD", "REVERSE"}:
+        return value
+    if motion in {"LEFT", "RIGHT", "BACKLEFT", "BACKRIGHT"}:
+        return math.radians(value) * radius
+    return 0.0
+
+
+def inverse_command_for_distance(
+    motion: str, distance: float, radius: float
+) -> Optional[Dict[str, Any]]:
+    if distance <= MOTION_EPS:
+        return None
+
+    if motion == "FORWARD":
+        return {"type": "BACKWARD", "value": round(distance, 1)}
+    if motion in {"BACKWARD", "REVERSE"}:
+        return {"type": "FORWARD", "value": round(distance, 1)}
+    if motion == "LEFT":
+        degrees = max(1, round((distance / radius) * (180 / math.pi)))
+        return {"type": "BACKLEFT", "value": degrees}
+    if motion == "RIGHT":
+        degrees = max(1, round((distance / radius) * (180 / math.pi)))
+        return {"type": "BACKRIGHT", "value": degrees}
+    if motion == "BACKLEFT":
+        degrees = max(1, round((distance / radius) * (180 / math.pi)))
+        return {"type": "LEFT", "value": degrees}
+    if motion == "BACKRIGHT":
+        degrees = max(1, round((distance / radius) * (180 / math.pi)))
+        return {"type": "RIGHT", "value": degrees}
+    return None
+
+
+def build_partial_reverse_commands(
+    commands: List[Dict[str, Any]], reverse_distance: float, radius: float
+) -> List[Dict[str, Any]]:
+    remaining = max(0.0, reverse_distance)
+    reverse_commands: List[Dict[str, Any]] = []
+
+    for command in reversed(commands):
+        if remaining <= MOTION_EPS:
+            break
+        cmd_len = command_travel_distance(command, radius)
+        if cmd_len <= MOTION_EPS:
+            continue
+
+        use_len = min(cmd_len, remaining)
+        motion = str(command.get("type", "")).upper()
+        inverse = inverse_command_for_distance(motion, use_len, radius)
+        if inverse is not None:
+            reverse_commands.append(inverse)
+        remaining -= use_len
+
+    return reverse_commands
+
+
+def sample_look_back_candidates(
+    samples: List[Point], look_back_limit: float, look_back_step: float
+) -> List[Tuple[int, float]]:
+    if not samples:
+        return []
+
+    candidates: List[Tuple[int, float]] = [(len(samples) - 1, 0.0)]
+    if len(samples) < 2 or look_back_limit <= MOTION_EPS:
+        return candidates
+
+    traveled = 0.0
+    last_mark = 0.0
+    farthest_index = len(samples) - 1
+    farthest_distance = 0.0
+
+    for idx in range(len(samples) - 2, -1, -1):
+        x1, y1, _ = samples[idx + 1]
+        x0, y0, _ = samples[idx]
+        traveled += math.hypot(x1 - x0, y1 - y0)
+        if traveled > look_back_limit + MOTION_EPS:
+            break
+
+        farthest_index = idx
+        farthest_distance = traveled
+
+        if traveled - last_mark >= look_back_step - MOTION_EPS:
+            candidates.append((idx, traveled))
+            last_mark = traveled
+
+    if (
+        farthest_distance > MOTION_EPS
+        and candidates[-1][0] != farthest_index
+    ):
+        candidates.append((farthest_index, farthest_distance))
+
+    return candidates
+
+
+def build_goals_from_obstacles(
+    obstacles: List[Dict[str, Any]],
+    approach_offset: float,
+    vehicle_length: float,
+    vehicle_width: float,
+) -> List[Point]:
+    goals: List[Point] = [DEFAULT_START_POSE]
+    longitudinal_offset = max(vehicle_length - FRONT_TO_BACK_WHEEL_MARGIN, MOTION_EPS)
+    lateral_offset = max(vehicle_width, 0.0) / 2.0
+    footprint_reading_bonus = max(
+        0.0,
+        (max(vehicle_width, 0.0) - PHYSICAL_OBSTACLE_SIZE) / 2.0,
+    )
+    effective_reading_distance = approach_offset + footprint_reading_bonus
+
+    for obstacle in obstacles:
+        direction = str(obstacle.get("d", obstacle.get("direction", "E"))).upper()
+        x = float(obstacle["x"])
+        y = float(obstacle["y"])
+
+        picture_x = x + (PHYSICAL_OBSTACLE_SIZE / 2.0)
+        picture_y = y + (PHYSICAL_OBSTACLE_SIZE / 2.0)
+        outward_x = 0.0
+        outward_y = 0.0
+        theta = 0.0
+
+        if direction == "N":
+            picture_y = y + PHYSICAL_OBSTACLE_SIZE
+            outward_y = 1.0
+            theta = -math.pi / 2
+        elif direction == "S":
+            picture_y = y
+            outward_y = -1.0
+            theta = math.pi / 2
+        elif direction == "W":
+            picture_x = x
+            outward_x = -1.0
+            theta = 0.0
+        elif direction == "E":
+            picture_x = x + PHYSICAL_OBSTACLE_SIZE
+            outward_x = 1.0
+            theta = math.pi
+
+        front_x = picture_x + outward_x * effective_reading_distance
+        front_y = picture_y + outward_y * effective_reading_distance
+
+        heading_x = math.cos(theta)
+        heading_y = math.sin(theta)
+        left_x = -math.sin(theta)
+        left_y = math.cos(theta)
+
+        # Planner pose reference is the rear wheel center used for turning.
+        gx = (
+            front_x
+            - heading_x * longitudinal_offset
+            - left_x * lateral_offset
+        )
+        gy = (
+            front_y
+            - heading_y * longitudinal_offset
+            - left_y * lateral_offset
+        )
+        goals.append((gx, gy, theta))
+
+    return goals
+
+
+def build_rect_obstacles(obstacles: List[Dict[str, Any]], safety_buffer: float) -> List[Rect]:
+    rects: List[Rect] = []
+    for obstacle in obstacles:
+        x = float(obstacle["x"])
+        y = float(obstacle["y"])
+        rects.append(
+            (
+                x - safety_buffer,
+                x + PHYSICAL_OBSTACLE_SIZE + safety_buffer,
+                y - safety_buffer,
+                y + PHYSICAL_OBSTACLE_SIZE + safety_buffer,
+            )
+        )
+    return rects
+
+
+def solve_tsp(goals: List[Point], radius: float, obstacles: List[Rect]) -> List[int]:
+    n = len(goals)
+    if n <= 1:
+        return [0]
+
+    edge_cache: Dict[str, Optional[Tuple[str, Tuple[float, float, float], float]]] = {}
+
+    def get_edge(i: int, j: int) -> Optional[Tuple[str, Tuple[float, float, float], float]]:
+        key = f"{i}-{j}"
+        if key in edge_cache:
+            return edge_cache[key]
+        result = find_valid_dubins_path(goals[i], goals[j], radius, obstacles)
+        edge_cache[key] = result
+        return result
+
+    def get_backtrack_distance(path: List[int], anchor_pos: int, end_pos: int) -> float:
+        total = 0.0
+        for i in range(anchor_pos + 1, end_pos + 1):
+            edge = get_edge(path[i - 1], path[i])
+            if edge is None:
+                return float("inf")
+            total += edge[2]
+        return total
+
+    def estimate_remaining_cost(current_node: int, visited: List[bool]) -> float:
+        remaining = [idx for idx in range(1, n) if not visited[idx]]
+        if not remaining:
+            return 0.0
+
+        total = 0.0
+        cursor = current_node
+        pool = list(remaining)
+
+        while pool:
+            best_index = 0
+            best_distance = float("inf")
+            for i, candidate in enumerate(pool):
+                edge = get_edge(cursor, candidate)
+                distance = (
+                    edge[2]
+                    if edge is not None
+                    else euclidean(goals[cursor], goals[candidate]) + UNREACHABLE_EDGE_PENALTY
+                )
+                if distance < best_distance:
+                    best_distance = distance
+                    best_index = i
+
+            total += best_distance
+            cursor = pool[best_index]
+            pool.pop(best_index)
+
+        return total * REMAINING_HEURISTIC_WEIGHT
+
+    def visited_key(visited: List[bool]) -> str:
+        return "".join("1" if value else "0" for value in visited)
+
+    def build_candidates_for_state(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        moves: List[Dict[str, Any]] = []
+        path = state["path"]
+        visited = state["visited"]
+        current_pos = len(path) - 1
+        anchor_start = max(0, current_pos - BACKTRACK_WINDOW)
+
+        for anchor_pos in range(current_pos, anchor_start - 1, -1):
+            anchor_node = path[anchor_pos]
+            backtrack_len = (
+                0.0
+                if anchor_pos == current_pos
+                else get_backtrack_distance(path, anchor_pos, current_pos)
+            )
+            if not math.isfinite(backtrack_len):
+                continue
+
+            for candidate in range(1, n):
+                if visited[candidate]:
+                    continue
+                edge = get_edge(anchor_node, candidate)
+                if edge is None:
+                    continue
+
+                rank = edge[2] + backtrack_len * (1.0 + BACKTRACK_PENALTY)
+                moves.append(
+                    {
+                        "anchor_pos": anchor_pos,
+                        "next_node": candidate,
+                        "backtrack_len": backtrack_len,
+                        "edge_len": edge[2],
+                        "rank": rank,
+                    }
+                )
+
+        if not moves:
+            current_node = path[current_pos]
+            fallback: Optional[int] = None
+            min_dist = float("inf")
+            for candidate in range(1, n):
+                if visited[candidate]:
+                    continue
+                dist = euclidean(goals[current_node], goals[candidate])
+                if dist < min_dist:
+                    min_dist = dist
+                    fallback = candidate
+
+            if fallback is not None:
+                moves.append(
+                    {
+                        "anchor_pos": current_pos,
+                        "next_node": fallback,
+                        "backtrack_len": 0.0,
+                        "edge_len": min_dist,
+                        "rank": min_dist,
+                    }
+                )
+
+        moves.sort(key=lambda move: (move["rank"], move["edge_len"]))
+        return moves[:MAX_BRANCHING_PER_STATE]
+
+    def make_next_state(state: Dict[str, Any], move: Dict[str, Any]) -> Dict[str, Any]:
+        path = state["path"]
+        current_pos = len(path) - 1
+        next_path = list(path)
+        anchor_pos = int(move["anchor_pos"])
+
+        if anchor_pos < current_pos:
+            for i in range(current_pos, anchor_pos, -1):
+                next_path.append(path[i - 1])
+        next_path.append(int(move["next_node"]))
+
+        next_visited = list(state["visited"])
+        next_visited[int(move["next_node"])] = True
+        next_travel = float(state["travel_cost"]) + float(move["backtrack_len"]) + float(move["edge_len"])
+        next_score = (
+            next_travel
+            + float(move["backtrack_len"]) * BACKTRACK_PENALTY
+            + estimate_remaining_cost(int(move["next_node"]), next_visited)
+        )
+
+        return {
+            "path": next_path,
+            "visited": next_visited,
+            "visited_count": int(state["visited_count"]) + 1,
+            "travel_cost": next_travel,
+            "score": next_score,
+        }
+
+    initial_visited = [False] * n
+    initial_visited[0] = True
+    frontier: List[Dict[str, Any]] = [
+        {
+            "path": [0],
+            "visited": initial_visited,
+            "visited_count": 1,
+            "travel_cost": 0.0,
+            "score": estimate_remaining_cost(0, initial_visited),
+        }
+    ]
+    best_complete: Optional[Dict[str, Any]] = None
+
+    for _ in range(1, n):
+        next_states: List[Dict[str, Any]] = []
+
+        for state in frontier:
+            for move in build_candidates_for_state(state):
+                next_state = make_next_state(state, move)
+                next_states.append(next_state)
+                if int(next_state["visited_count"]) == n:
+                    if best_complete is None or float(next_state["travel_cost"]) < float(best_complete["travel_cost"]):
+                        best_complete = next_state
+
+        if not next_states:
+            break
+
+        deduped: Dict[str, Dict[str, Any]] = {}
+        for state in next_states:
+            last_node = int(state["path"][-1])
+            key = f"{last_node}:{visited_key(state['visited'])}"
+            previous = deduped.get(key)
+            if previous is None:
+                deduped[key] = state
+                continue
+            if float(state["score"]) < float(previous["score"]):
+                deduped[key] = state
+            elif (
+                float(state["score"]) == float(previous["score"])
+                and float(state["travel_cost"]) < float(previous["travel_cost"])
+            ):
+                deduped[key] = state
+
+        frontier = sorted(
+            deduped.values(),
+            key=lambda state: (float(state["score"]), float(state["travel_cost"])),
+        )[:BEAM_WIDTH]
+
+    if best_complete is not None:
+        return list(best_complete["path"])
+    if frontier:
+        best_partial = min(frontier, key=lambda state: (float(state["score"]), float(state["travel_cost"])))
+        return list(best_partial["path"])
+    return [0]
+
+
+def _normalize_theta(theta: float) -> float:
+    return mod2pi(theta)
+
+
+def _angle_distance(a: float, b: float) -> float:
+    return abs(mod2pi(a - b + math.pi) - math.pi)
+
+
+def _right_vector(theta: float) -> Tuple[float, float]:
+    return math.sin(theta), -math.cos(theta)
+
+
+def _center_pose_from_left_back(
+    pose: Point, vehicle_length: float, vehicle_width: float
+) -> Point:
+    x, y, theta = pose
+    rx, ry = _right_vector(theta)
+    return (
+        x + (vehicle_length / 2.0) * math.cos(theta) + (vehicle_width / 2.0) * rx,
+        y + (vehicle_length / 2.0) * math.sin(theta) + (vehicle_width / 2.0) * ry,
+        theta,
+    )
+
+
+def _left_back_pose_from_center(
+    pose: Point, vehicle_length: float, vehicle_width: float
+) -> Point:
+    x, y, theta = pose
+    rx, ry = _right_vector(theta)
+    return (
+        x - (vehicle_length / 2.0) * math.cos(theta) - (vehicle_width / 2.0) * rx,
+        y - (vehicle_length / 2.0) * math.sin(theta) - (vehicle_width / 2.0) * ry,
+        theta,
+    )
+
+
+def _camera_position_from_center(
+    pose: Point, vehicle_length: float
+) -> Tuple[float, float]:
+    x, y, theta = pose
+    return (
+        x + (vehicle_length / 2.0) * math.cos(theta),
+        y + (vehicle_length / 2.0) * math.sin(theta),
+    )
+
+
+def _goal_pose_for_obstacle_realistic(
+    obstacle: Dict[str, Any],
+    approach_offset: float,
+    vehicle_length: float,
+    rear_track: float,
+) -> Point:
+    direction = str(obstacle.get("d", obstacle.get("direction", "E"))).upper()
+    x = float(obstacle["x"])
+    y = float(obstacle["y"])
+
+    picture_x = x + (PHYSICAL_OBSTACLE_SIZE / 2.0)
+    picture_y = y + (PHYSICAL_OBSTACLE_SIZE / 2.0)
+    outward_x = 0.0
+    outward_y = 0.0
+    theta = 0.0
+
+    if direction == "N":
+        picture_y = y + PHYSICAL_OBSTACLE_SIZE
+        outward_y = 1.0
+        theta = -math.pi / 2
+    elif direction == "S":
+        picture_y = y
+        outward_y = -1.0
+        theta = math.pi / 2
+    elif direction == "W":
+        picture_x = x
+        outward_x = -1.0
+        theta = 0.0
+    elif direction == "E":
+        picture_x = x + PHYSICAL_OBSTACLE_SIZE
+        outward_x = 1.0
+        theta = math.pi
+
+    reading_distance = max(0.0, float(approach_offset))
+    camera_x = picture_x + outward_x * reading_distance
+    camera_y = picture_y + outward_y * reading_distance
+    gx = camera_x - (vehicle_length / 2.0) * math.cos(theta)
+    gy = camera_y - (vehicle_length / 2.0) * math.sin(theta)
+    return gx, gy, theta
+
+
+def build_goals_from_obstacles_realistic(
+    obstacles: List[Dict[str, Any]],
+    approach_offset: float,
+    vehicle_length: float,
+    vehicle_width: float,
+    rear_track: float,
+) -> List[Point]:
+    goals: List[Point] = [
+        _center_pose_from_left_back(DEFAULT_START_POSE, vehicle_length, vehicle_width)
+    ]
+
+    for obstacle in obstacles:
+        goals.append(
+            _goal_pose_for_obstacle_realistic(
+                obstacle,
+                approach_offset,
+                vehicle_length,
+                rear_track,
+            )
+        )
+
+    return goals
+
+
+def _simulate_motion_with_samples(
+    pose: Point,
+    motion: str,
+    value: float,
+    left_turn_radius: float,
+    right_turn_radius: float,
+    rear_track: float,
+    vehicle_length: float = DEFAULT_VEHICLE_LENGTH,
+    linear_step: float = 1.0,
+    angular_step_deg: float = 4.0,
+) -> Tuple[Point, List[Point], float]:
+    x, y, theta = pose
+    motion_norm = motion.upper()
+    samples: List[Point] = []
+    traveled_cost = 0.0
+
+    if motion_norm in {"FORWARD", "BACKWARD"}:
+        total = max(0.0, float(value))
+        direction = 1.0 if motion_norm == "FORWARD" else -1.0
+        progressed = 0.0
+        while progressed < total - MOTION_EPS:
+            ds = min(linear_step, total - progressed)
+            x += direction * ds * math.cos(theta)
+            y += direction * ds * math.sin(theta)
+            progressed += ds
+            traveled_cost += ds
+            samples.append((x, y, _normalize_theta(theta)))
+        return (x, y, _normalize_theta(theta)), samples, traveled_cost
+
+    arc_deg = max(0.0, float(value))
+    total_angle = math.radians(arc_deg)
+    if total_angle <= MOTION_EPS:
+        return (x, y, _normalize_theta(theta)), samples, traveled_cost
+
+    step_angle = math.radians(max(1.0, angular_step_deg))
+    half_length = vehicle_length / 2.0
+
+    if motion_norm in {"LEFT", "BACKLEFT"}:
+        side_radius = max((rear_track / 2.0) + left_turn_radius, MOTION_EPS)
+        center_x = x - half_length * math.cos(theta) - side_radius * math.sin(theta)
+        center_y = y - half_length * math.sin(theta) + side_radius * math.cos(theta)
+        turn_sign = 1.0 if motion_norm == "LEFT" else -1.0
+        progressed = 0.0
+        while progressed < total_angle - MOTION_EPS:
+            dtheta = min(step_angle, total_angle - progressed)
+            theta = theta + turn_sign * dtheta
+            x = center_x + half_length * math.cos(theta) + side_radius * math.sin(theta)
+            y = center_y + half_length * math.sin(theta) - side_radius * math.cos(theta)
+            progressed += dtheta
+            center_radius = math.hypot(half_length, side_radius)
+            traveled_cost += center_radius * dtheta
+            samples.append((x, y, _normalize_theta(theta)))
+        return (x, y, _normalize_theta(theta)), samples, traveled_cost
+
+    if motion_norm in {"RIGHT", "BACKRIGHT"}:
+        side_radius = max((rear_track / 2.0) + right_turn_radius, MOTION_EPS)
+        center_x = x - half_length * math.cos(theta) + side_radius * math.sin(theta)
+        center_y = y - half_length * math.sin(theta) - side_radius * math.cos(theta)
+        turn_sign = -1.0 if motion_norm == "RIGHT" else 1.0
+        progressed = 0.0
+        while progressed < total_angle - MOTION_EPS:
+            dtheta = min(step_angle, total_angle - progressed)
+            theta = theta + turn_sign * dtheta
+            x = center_x + half_length * math.cos(theta) - side_radius * math.sin(theta)
+            y = center_y + half_length * math.sin(theta) + side_radius * math.cos(theta)
+            progressed += dtheta
+            center_radius = math.hypot(half_length, side_radius)
+            traveled_cost += center_radius * dtheta
+            samples.append((x, y, _normalize_theta(theta)))
+        return (x, y, _normalize_theta(theta)), samples, traveled_cost
+
+    return (x, y, _normalize_theta(theta)), samples, traveled_cost
+
+
+def _pose_body_points(
+    pose: Point, vehicle_length: float, vehicle_width: float, rear_track: float
+) -> List[Tuple[float, float]]:
+    x, y, theta = pose
+    body_width = max(vehicle_width, rear_track)
+    hx = math.cos(theta)
+    hy = math.sin(theta)
+    rx, ry = _right_vector(theta)
+    half_length = vehicle_length / 2.0
+    half_width = body_width / 2.0
+    half_track = rear_track / 2.0
+
+    rear_center = (x - half_length * hx, y - half_length * hy)
+    front_center = (x + half_length * hx, y + half_length * hy)
+
+    rear_left_wheel = (
+        rear_center[0] - half_track * rx,
+        rear_center[1] - half_track * ry,
+    )
+    rear_right_wheel = (
+        rear_center[0] + half_track * rx,
+        rear_center[1] + half_track * ry,
+    )
+
+    rear_left = (
+        rear_center[0] - half_width * rx,
+        rear_center[1] - half_width * ry,
+    )
+    rear_right = (
+        rear_center[0] + half_width * rx,
+        rear_center[1] + half_width * ry,
+    )
+    front_left = (
+        front_center[0] - half_width * rx,
+        front_center[1] - half_width * ry,
+    )
+    front_right = (
+        front_center[0] + half_width * rx,
+        front_center[1] + half_width * ry,
+    )
+    rear_mid = ((rear_left[0] + rear_right[0]) / 2.0, (rear_left[1] + rear_right[1]) / 2.0)
+    front_mid = (
+        (front_left[0] + front_right[0]) / 2.0,
+        (front_left[1] + front_right[1]) / 2.0,
+    )
+    left_mid = ((rear_left[0] + front_left[0]) / 2.0, (rear_left[1] + front_left[1]) / 2.0)
+    right_mid = ((rear_right[0] + front_right[0]) / 2.0, (rear_right[1] + front_right[1]) / 2.0)
+    center = (
+        (rear_left[0] + rear_right[0] + front_left[0] + front_right[0]) / 4.0,
+        (rear_left[1] + rear_right[1] + front_left[1] + front_right[1]) / 4.0,
+    )
+    return [
+        rear_left_wheel,
+        rear_right_wheel,
+        rear_left,
+        rear_right,
+        front_left,
+        front_right,
+        rear_mid,
+        front_mid,
+        left_mid,
+        right_mid,
+        center,
+    ]
+
+
+def _is_pose_valid_realistic(
+    pose: Point,
+    obstacles: List[Rect],
+    vehicle_length: float,
+    vehicle_width: float,
+    rear_track: float,
+) -> bool:
+    for px, py in _pose_body_points(pose, vehicle_length, vehicle_width, rear_track):
+        if not within_bounds(px, py):
+            return False
+        for obstacle in obstacles:
+            if point_in_rect(px, py, obstacle):
+                return False
+    return True
+
+
+def _quantize_pose_key(
+    pose: Point, pos_resolution: float, heading_buckets: int
+) -> Tuple[int, int, int]:
+    x, y, theta = pose
+    bucket_size = 2.0 * math.pi / float(heading_buckets)
+    heading = int(round(_normalize_theta(theta) / bucket_size)) % heading_buckets
+    return (
+        int(round(x / pos_resolution)),
+        int(round(y / pos_resolution)),
+        heading,
+    )
+
+
+def _compress_motion_commands(commands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    compressed: List[Dict[str, Any]] = []
+    for command in commands:
+        motion = str(command.get("type", "")).upper()
+        try:
+            value = float(command.get("value", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if value <= MOTION_EPS:
+            continue
+
+        if compressed and compressed[-1]["type"] == motion:
+            compressed[-1]["value"] = float(compressed[-1]["value"]) + value
+            continue
+        compressed.append({"type": motion, "value": value})
+
+    finalized: List[Dict[str, Any]] = []
+    for command in compressed:
+        motion = command["type"]
+        value = float(command["value"])
+        if motion in {"FORWARD", "BACKWARD"}:
+            if value > MOTION_EPS:
+                finalized.append({"type": motion, "value": round(value, 1)})
+        else:
+            degrees = max(1, round(value))
+            finalized.append({"type": motion, "value": degrees})
+    return finalized
+
+
+def _find_realistic_path_astar(
+    start_pose: Point,
+    goal_pose: Point,
+    obstacles: List[Rect],
+    left_turn_radius: float,
+    right_turn_radius: float,
+    rear_track: float,
+    vehicle_length: float,
+    vehicle_width: float,
+) -> Optional[Dict[str, Any]]:
+    if not _is_pose_valid_realistic(
+        start_pose, obstacles, vehicle_length, vehicle_width, rear_track
+    ):
+        return None
+
+    pos_resolution = 4.0
+    heading_buckets = 16
+    max_expansions = 12000
+    position_tolerance = 6.0
+    heading_tolerance = math.radians(REALISTIC_HEADING_TOLERANCE_DEG)
+
+    motion_primitives: List[Tuple[str, float]] = [
+        ("FORWARD", 20.0),
+        ("FORWARD", 12.0),
+        ("FORWARD", 8.0),
+        ("BACKWARD", 8.0),
+        ("LEFT", 12.0),
+        ("RIGHT", 12.0),
+        ("LEFT", 24.0),
+        ("RIGHT", 24.0),
+        ("LEFT", 36.0),
+        ("RIGHT", 36.0),
+        ("BACKLEFT", 12.0),
+        ("BACKRIGHT", 12.0),
+    ]
+
+    goal_camera = _camera_position_from_center(goal_pose, vehicle_length)
+
+    def heuristic(pose: Point) -> float:
+        camera = _camera_position_from_center(pose, vehicle_length)
+        heading_penalty = min(left_turn_radius, right_turn_radius) * _angle_distance(
+            pose[2], goal_pose[2]
+        )
+        return math.hypot(camera[0] - goal_camera[0], camera[1] - goal_camera[1]) + heading_penalty
+
+    def is_goal(pose: Point) -> bool:
+        camera = _camera_position_from_center(pose, vehicle_length)
+        return (
+            math.hypot(camera[0] - goal_camera[0], camera[1] - goal_camera[1])
+            <= position_tolerance
+            and _angle_distance(pose[2], goal_pose[2]) <= heading_tolerance
+        )
+
+    nodes: List[Dict[str, Any]] = [
+        {
+            "pose": start_pose,
+            "parent": -1,
+            "command": None,
+            "g": 0.0,
+            "last_motion": None,
+        }
+    ]
+    start_key = _quantize_pose_key(start_pose, pos_resolution, heading_buckets)
+    best_g: Dict[Tuple[int, int, int], float] = {start_key: 0.0}
+    frontier: List[Tuple[float, float, int]] = [
+        (heuristic(start_pose), 0.0, 0)
+    ]
+
+    expansions = 0
+    best_goal_idx: Optional[int] = None
+
+    while frontier and expansions < max_expansions:
+        _, g_cost, node_idx = heapq.heappop(frontier)
+        node = nodes[node_idx]
+        pose = node["pose"]
+        key = _quantize_pose_key(pose, pos_resolution, heading_buckets)
+        known_best = best_g.get(key, float("inf"))
+        if g_cost > known_best + MOTION_EPS:
+            continue
+
+        if is_goal(pose):
+            best_goal_idx = node_idx
+            break
+
+        expansions += 1
+        for motion, value in motion_primitives:
+            end_pose, samples, step_cost = _simulate_motion_with_samples(
+                pose,
+                motion,
+                value,
+                left_turn_radius,
+                right_turn_radius,
+                rear_track,
+                vehicle_length,
+            )
+            if step_cost <= MOTION_EPS:
+                continue
+
+            valid = True
+            for sample_pose in samples:
+                if not _is_pose_valid_realistic(
+                    sample_pose, obstacles, vehicle_length, vehicle_width, rear_track
+                ):
+                    valid = False
+                    break
+            if not valid:
+                continue
+
+            last_motion = node.get("last_motion")
+            extra_penalty = 0.0
+            if motion in {"BACKWARD", "BACKLEFT", "BACKRIGHT"}:
+                extra_penalty += ASTAR_REVERSE_MOTION_PENALTY
+            if isinstance(last_motion, str):
+                if motion != last_motion:
+                    extra_penalty += ASTAR_MOTION_SWITCH_PENALTY
+
+                last_is_reverse = last_motion in {"BACKWARD", "BACKLEFT", "BACKRIGHT"}
+                next_is_reverse = motion in {"BACKWARD", "BACKLEFT", "BACKRIGHT"}
+                if last_is_reverse != next_is_reverse:
+                    extra_penalty += ASTAR_DIRECTION_SWITCH_PENALTY
+
+                last_turn_group = (
+                    "L"
+                    if last_motion in {"LEFT", "BACKLEFT"}
+                    else "R"
+                    if last_motion in {"RIGHT", "BACKRIGHT"}
+                    else None
+                )
+                next_turn_group = (
+                    "L"
+                    if motion in {"LEFT", "BACKLEFT"}
+                    else "R"
+                    if motion in {"RIGHT", "BACKRIGHT"}
+                    else None
+                )
+                if (
+                    last_turn_group is not None
+                    and next_turn_group is not None
+                    and last_turn_group != next_turn_group
+                ):
+                    extra_penalty += ASTAR_STEERING_FLIP_PENALTY
+
+            next_g = node["g"] + step_cost + extra_penalty
+            next_key = _quantize_pose_key(end_pose, pos_resolution, heading_buckets)
+            if next_g >= best_g.get(next_key, float("inf")) - MOTION_EPS:
+                continue
+
+            best_g[next_key] = next_g
+            command_value = value if motion in {"FORWARD", "BACKWARD"} else round(value)
+            next_node = {
+                "pose": end_pose,
+                "parent": node_idx,
+                "command": {"type": motion, "value": command_value},
+                "g": next_g,
+                "last_motion": motion,
+            }
+            nodes.append(next_node)
+            next_idx = len(nodes) - 1
+            heapq.heappush(
+                frontier,
+                (next_g + heuristic(end_pose), next_g, next_idx),
+            )
+
+    if best_goal_idx is None:
+        return None
+
+    raw_commands: List[Dict[str, Any]] = []
+    cursor = best_goal_idx
+    while cursor >= 0:
+        command = nodes[cursor]["command"]
+        if command is not None:
+            raw_commands.append(command)
+        cursor = int(nodes[cursor]["parent"])
+    raw_commands.reverse()
+    commands = _compress_motion_commands(raw_commands)
+    return {
+        "commands": commands,
+        "end_pose": nodes[best_goal_idx]["pose"],
+        "cost": float(nodes[best_goal_idx]["g"]),
+    }
+
+
+def _compute_plan_from_obstacles_realistic(
+    obstacles: List[Dict[str, Any]],
+    approach_offset: float,
+    safety_buffer: float,
+    vehicle_length: float,
+    vehicle_width: float,
+    left_turn_radius: float,
+    right_turn_radius: float,
+    rear_track: float,
+) -> Dict[str, Any]:
+    goals = build_goals_from_obstacles_realistic(
+        obstacles,
+        approach_offset,
+        vehicle_length,
+        vehicle_width,
+        rear_track,
+    )
+    rect_obstacles = build_rect_obstacles(obstacles, safety_buffer)
+    relaxed_rect_obstacles = (
+        build_rect_obstacles(obstacles, 0.0)
+        if safety_buffer > MOTION_EPS
+        else rect_obstacles
+    )
+
+    commands: List[Dict[str, Any]] = []
+    scanned_targets: set[int] = set()
+    remaining_targets: set[int] = set(range(1, len(goals)))
+    current_pose = goals[0]
+    path_order: List[int] = [0]
+    goal_options: Dict[int, List[Tuple[Point, float]]] = {}
+
+    for target_idx in remaining_targets:
+        obstacle = obstacles[target_idx - 1]
+        fallback_offsets: List[float] = []
+        candidate = max(0.0, float(approach_offset))
+        while candidate > 0.0:
+            fallback_offsets.append(round(candidate, 3))
+            candidate -= 10.0
+        fallback_offsets.append(0.0)
+
+        unique_offsets: List[float] = []
+        seen_offsets: set[float] = set()
+        for value in fallback_offsets:
+            key = round(value, 3)
+            if key in seen_offsets:
+                continue
+            seen_offsets.add(key)
+            unique_offsets.append(value)
+
+        options: List[Tuple[Point, float]] = []
+        seen_goal_keys: set[Tuple[int, int, int]] = set()
+        for offset in unique_offsets:
+            pose = _goal_pose_for_obstacle_realistic(
+                obstacle,
+                offset,
+                vehicle_length,
+                rear_track,
+            )
+            pose_key = _quantize_pose_key(pose, 1.0, 360)
+            if pose_key in seen_goal_keys:
+                continue
+            seen_goal_keys.add(pose_key)
+            options.append((pose, offset))
+        goal_options[target_idx] = options
+
+    def choose_best_choice(
+        candidate_obstacles: List[Rect], safety_penalty: float
+    ) -> Optional[Dict[str, Any]]:
+        best_choice: Optional[Dict[str, Any]] = None
+        for target_idx in sorted(remaining_targets):
+            plan: Optional[Dict[str, Any]] = None
+            offset_used = approach_offset
+            for goal_pose, candidate_offset in goal_options.get(
+                target_idx, [(goals[target_idx], approach_offset)]
+            ):
+                if not _is_pose_valid_realistic(
+                    goal_pose,
+                    candidate_obstacles,
+                    vehicle_length,
+                    vehicle_width,
+                    rear_track,
+                ):
+                    continue
+                next_plan = _find_realistic_path_astar(
+                    current_pose,
+                    goal_pose,
+                    candidate_obstacles,
+                    left_turn_radius,
+                    right_turn_radius,
+                    rear_track,
+                    vehicle_length,
+                    vehicle_width,
+                )
+                if next_plan is None:
+                    continue
+                plan = next_plan
+                offset_used = candidate_offset
+                break
+            if plan is None:
+                continue
+
+            completeness_penalty = max(0.0, float(approach_offset) - float(offset_used)) * 4.0
+            candidate = {
+                "target_idx": target_idx,
+                "commands": plan["commands"],
+                "end_pose": plan["end_pose"],
+                "cost": float(plan["cost"]) + completeness_penalty + safety_penalty,
+            }
+            if best_choice is None:
+                best_choice = candidate
+                continue
+            candidate_cost = float(candidate["cost"])
+            best_cost = float(best_choice["cost"])
+            if candidate_cost < best_cost - MOTION_EPS:
+                best_choice = candidate
+                continue
+            if (
+                abs(candidate_cost - best_cost) <= MOTION_EPS
+                and int(candidate["target_idx"]) < int(best_choice["target_idx"])
+            ):
+                best_choice = candidate
+        return best_choice
+
+    while remaining_targets:
+        best_choice: Optional[Dict[str, Any]] = choose_best_choice(rect_obstacles, 0.0)
+        if best_choice is None and relaxed_rect_obstacles is not rect_obstacles:
+            best_choice = choose_best_choice(
+                relaxed_rect_obstacles, max(0.0, float(safety_buffer)) * 20.0
+            )
+
+        if best_choice is None:
+            break
+
+        movement_commands = list(best_choice["commands"])
+        commands.extend(movement_commands)
+
+        target_idx = int(best_choice["target_idx"])
+        if target_idx not in scanned_targets:
+            commands.append({"type": "PAUSE", "value": 500})
+            commands.append({"type": "READ", "value": 500})
+            scanned_targets.add(target_idx)
+
+        current_pose = best_choice["end_pose"]
+        path_order.append(target_idx)
+        remaining_targets.discard(target_idx)
+
+    unreachable_indices = sorted(idx - 1 for idx in remaining_targets)
+    instruction_strings = [_command_to_string(command) for command in commands]
+    return {
+        "path_order": path_order,
+        "commands": commands,
+        "instructions": instruction_strings,
+        "unreachable_indices": unreachable_indices,
+    }
+
+
+def _command_to_string(command: Dict[str, Any]) -> str:
+    motion = str(command.get("type", "UNKNOWN")).upper()
+    value: Any = command.get("value", 0)
+
+    if motion in {"FORWARD", "BACKWARD", "REVERSE"}:
+        try:
+            value = round(float(value) * 10.0, 1)
+        except (TypeError, ValueError):
+            pass
+
+    if isinstance(value, float) and value.is_integer():
+        value_text = str(int(value))
+    else:
+        value_text = str(value)
+    return f"{command.get('type', 'UNKNOWN')} {value_text}"
+
+
+def _compute_plan_from_obstacles_legacy(
+    obstacles: List[Dict[str, Any]],
+    radius: float = DEFAULT_RADIUS,
+    approach_offset: float = DEFAULT_APPROACH_OFFSET,
+    safety_buffer: float = DEFAULT_SAFETY_BUFFER,
+    vehicle_length: float = DEFAULT_VEHICLE_LENGTH,
+    vehicle_width: float = DEFAULT_VEHICLE_WIDTH,
+) -> Dict[str, Any]:
+    goals = build_goals_from_obstacles(
+        obstacles,
+        approach_offset,
+        vehicle_length,
+        vehicle_width,
+    )
+    rect_obstacles = build_rect_obstacles(obstacles, safety_buffer)
+    preferred_order = solve_tsp(goals, radius, rect_obstacles)
+    preferred_rank: Dict[int, int] = {}
+    for rank, node in enumerate(preferred_order):
+        if node == 0 or node in preferred_rank:
+            continue
+        preferred_rank[node] = rank
+
+    commands: List[Dict[str, Any]] = []
+    scanned_targets: set[int] = set()
+    remaining_targets: set[int] = set(range(1, len(goals)))
+    current_idx = 0
+    path_order: List[int] = [0]
+    edge_history: List[Dict[str, Any]] = []
+
+    while remaining_targets:
+        last_edge = edge_history[-1] if edge_history else None
+        best_choice: Optional[Dict[str, Any]] = None
+
+        for target_idx in sorted(remaining_targets):
+            q0 = goals[current_idx]
+            q1 = goals[target_idx]
+            start_pose = q0
+            edge = find_valid_dubins_path(start_pose, q1, radius, rect_obstacles)
+            best_total_cost = edge[2] if edge is not None else float("inf")
+            reverse_distance = 0.0
+            reverse_sample_index = -1
+
+            if (
+                last_edge is not None
+                and last_edge.get("to") == current_idx
+                and isinstance(last_edge.get("samples"), list)
+                and len(last_edge["samples"]) > 1
+            ):
+                look_back_candidates = sample_look_back_candidates(
+                    last_edge["samples"], LOOK_BACK_LIMIT, LOOK_BACK_SAMPLE_STEP
+                )
+                for sample_idx, candidate_reverse_distance in look_back_candidates[1:]:
+                    candidate_pose = last_edge["samples"][sample_idx]
+                    candidate_edge = find_valid_dubins_path(
+                        candidate_pose, q1, radius, rect_obstacles
+                    )
+                    if candidate_edge is None:
+                        continue
+
+                    total_cost = candidate_reverse_distance + candidate_edge[2]
+                    if total_cost + MOTION_EPS < best_total_cost:
+                        best_total_cost = total_cost
+                        start_pose = candidate_pose
+                        edge = candidate_edge
+                        reverse_distance = candidate_reverse_distance
+                        reverse_sample_index = sample_idx
+
+            if edge is None:
+                continue
+
+            connectivity = 0
+            for other_idx in remaining_targets:
+                if other_idx == target_idx:
+                    continue
+                if find_valid_dubins_path(goals[target_idx], goals[other_idx], radius, rect_obstacles):
+                    connectivity += 1
+
+            rank = preferred_rank.get(target_idx, len(goals))
+            score = (
+                best_total_cost
+                + rank * ORDER_PREFERENCE_WEIGHT
+                - connectivity * COMPLETENESS_CONNECTIVITY_BONUS
+            )
+
+            candidate = {
+                "target_idx": target_idx,
+                "start_pose": start_pose,
+                "edge": edge,
+                "reverse_distance": reverse_distance,
+                "reverse_sample_index": reverse_sample_index,
+                "transition_cost": best_total_cost,
+                "score": score,
+            }
+            if best_choice is None:
+                best_choice = candidate
+                continue
+            if score < float(best_choice["score"]) - MOTION_EPS:
+                best_choice = candidate
+                continue
+            if (
+                abs(score - float(best_choice["score"])) <= MOTION_EPS
+                and best_total_cost < float(best_choice["transition_cost"])
+            ):
+                best_choice = candidate
+                continue
+            if (
+                abs(score - float(best_choice["score"])) <= MOTION_EPS
+                and abs(best_total_cost - float(best_choice["transition_cost"])) <= MOTION_EPS
+                and target_idx < int(best_choice["target_idx"])
+            ):
+                best_choice = candidate
+
+        if best_choice is None:
+            break
+
+        if (
+            float(best_choice["reverse_distance"]) > MOTION_EPS
+            and last_edge is not None
+        ):
+            partial_reverse_commands = build_partial_reverse_commands(
+                last_edge["commands"], float(best_choice["reverse_distance"]), radius
+            )
+            commands.extend(partial_reverse_commands)
+
+        edge = best_choice["edge"]
+        path_type, segments, _ = edge
+        movement_commands = segments_to_commands(path_type, segments, radius)
+        commands.extend(movement_commands)
+
+        target_idx = int(best_choice["target_idx"])
+        if target_idx not in scanned_targets:
+            commands.append({"type": "PAUSE", "value": 500})
+            commands.append({"type": "READ", "value": 500})
+            scanned_targets.add(target_idx)
+
+        path_samples = sample_dubins_path(
+            best_choice["start_pose"], path_type, segments, radius, 1.0
+        )
+        edge_history.append(
+            {
+                "from": current_idx,
+                "to": target_idx,
+                "commands": movement_commands,
+                "samples": path_samples,
+                "is_full_edge": float(best_choice["reverse_distance"]) <= MOTION_EPS,
+            }
+        )
+
+        current_idx = target_idx
+        path_order.append(current_idx)
+        remaining_targets.discard(current_idx)
+
+    unreachable_indices = sorted(idx - 1 for idx in remaining_targets)
+
+    instruction_strings = [_command_to_string(command) for command in commands]
+    return {
+        "path_order": path_order,
+        "commands": commands,
+        "instructions": instruction_strings,
+        "unreachable_indices": unreachable_indices,
+    }
+
+
+def compute_plan_from_obstacles(
+    obstacles: List[Dict[str, Any]],
+    radius: float = DEFAULT_RADIUS,
+    approach_offset: float = DEFAULT_APPROACH_OFFSET,
+    safety_buffer: float = DEFAULT_SAFETY_BUFFER,
+    vehicle_length: float = DEFAULT_VEHICLE_LENGTH,
+    vehicle_width: float = DEFAULT_VEHICLE_WIDTH,
+    algorithm: str = DEFAULT_ALGORITHM,
+    left_turn_radius: float = DEFAULT_LEFT_TURN_RADIUS,
+    right_turn_radius: float = DEFAULT_RIGHT_TURN_RADIUS,
+    rear_track: float = DEFAULT_REAR_TRACK,
+) -> Dict[str, Any]:
+    mode = str(algorithm).strip().lower()
+    if mode == "realistic":
+        return _compute_plan_from_obstacles_realistic(
+            obstacles=obstacles,
+            approach_offset=approach_offset,
+            safety_buffer=safety_buffer,
+            vehicle_length=vehicle_length,
+            vehicle_width=vehicle_width,
+            left_turn_radius=left_turn_radius,
+            right_turn_radius=right_turn_radius,
+            rear_track=rear_track,
+        )
+    return _compute_plan_from_obstacles_legacy(
+        obstacles=obstacles,
+        radius=radius,
+        approach_offset=approach_offset,
+        safety_buffer=safety_buffer,
+        vehicle_length=vehicle_length,
+        vehicle_width=vehicle_width,
+    )

@@ -1,0 +1,673 @@
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Literal
+from urllib import error, request
+
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, ValidationError
+from planner import (
+    DEFAULT_ALGORITHM,
+    DEFAULT_APPROACH_OFFSET,
+    DEFAULT_LEFT_TURN_RADIUS,
+    DEFAULT_RADIUS,
+    DEFAULT_REAR_TRACK,
+    DEFAULT_RIGHT_TURN_RADIUS,
+    DEFAULT_SAFETY_BUFFER,
+    DEFAULT_VEHICLE_LENGTH,
+    DEFAULT_VEHICLE_WIDTH,
+    compute_plan_from_obstacles,
+)
+
+app = FastAPI(title="Robot Path API", version="1.0.0")
+
+# Allow the React/Vite app (and local testing tools) to call this API.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+
+class Obstacle(BaseModel):
+    id: int | str
+    x: float
+    y: float
+    d: Literal["N", "S", "E", "W"] = "E"
+
+
+def _parse_json_if_string(value: Any) -> Any:
+    if isinstance(value, str):
+        return json.loads(value)
+    return value
+
+
+def _extract_obstacles(payload: Any) -> List[Obstacle]:
+    raw = _parse_json_if_string(payload)
+
+    if isinstance(raw, dict):
+        if "data" in raw:
+            raw = raw["data"]
+        elif "obstacles" in raw:
+            raw = raw["obstacles"]
+        elif "block_positions" in raw:
+            raw = raw["block_positions"]
+
+    raw = _parse_json_if_string(raw)
+
+    if not isinstance(raw, list):
+        raise HTTPException(
+            status_code=400,
+            detail="Obstacle payload must be a list or object with data/obstacles/block_positions.",
+        )
+
+    try:
+        return [Obstacle.model_validate(item) for item in raw]
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+
+def _normalize_motion(motion: str) -> str:
+    normalized = motion.strip().upper()
+    if normalized == "REVERSE":
+        return "BACKWARD"
+    return normalized
+
+
+def _normalize_instruction_text(instruction: str) -> str:
+    trimmed = instruction.strip()
+    if not trimmed:
+        return trimmed
+    parts = trimmed.split(maxsplit=1)
+    motion = _normalize_motion(parts[0])
+    if len(parts) == 1:
+        return motion
+    return f"{motion} {parts[1]}"
+
+
+def _extract_instruction_strings(payload: Dict[str, Any]) -> List[str]:
+    # Preferred format: {"instructions": ["FORWARD 10", "RIGHT 50"]}
+    raw_instructions = payload.get("instructions")
+    if isinstance(raw_instructions, list):
+        if all(isinstance(item, str) for item in raw_instructions):
+            return [_normalize_instruction_text(item) for item in raw_instructions]
+        raise HTTPException(status_code=422, detail="`instructions` must be a list of strings.")
+
+    # Fallback format: {"commands": [{"type":"FORWARD","value":10}, ...]}
+    raw_commands = payload.get("commands")
+    if isinstance(raw_commands, list):
+        instructions: List[str] = []
+        for idx, command in enumerate(raw_commands):
+            if not isinstance(command, dict):
+                raise HTTPException(status_code=422, detail=f"Command at index {idx} must be an object.")
+            motion = str(command.get("type", "")).strip().upper()
+            value = command.get("value")
+            if motion == "" or value is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Command at index {idx} requires `type` and `value`.",
+                )
+            instructions.append(f"{_normalize_motion(motion)} {value}")
+        return instructions
+
+    # Backward compatibility with early prototype key.
+    raw_block_positions = payload.get("block_positions")
+    if isinstance(raw_block_positions, list) and all(isinstance(item, str) for item in raw_block_positions):
+        return [_normalize_instruction_text(item) for item in raw_block_positions]
+
+    raise HTTPException(
+        status_code=422,
+        detail="Expected `instructions` (string list) or `commands` in request body.",
+    )
+
+
+_obstacle_store: List[Dict[str, Any]] = [
+    {"id": 1, "x": 50, "y": 50, "d": "E"},
+    {"id": 2, "x": 150, "y": 150, "d": "W"},
+    {"id": 3, "x": 50, "y": 150, "d": "S"},
+]
+_last_instruction_store: List[str] = []
+_instruction_version: int = 0
+_last_instruction_updated_at: str | None = None
+_last_plan_meta: Dict[str, Any] = {"path_order": [], "unreachable_indices": [], "visiting": []}
+_last_plan_signature: str | None = None
+_last_plan_result: Dict[str, Any] | None = None
+_default_receiver_url = os.getenv("RECEIVER_URL", "http://192.168.17.1:8000/algo-result")
+_automatic_response_enabled: bool = False
+_automatic_plan_settings: Dict[str, Any] = {
+    "algorithm": DEFAULT_ALGORITHM,
+    "radius": DEFAULT_RADIUS,
+    "left_turn_radius": DEFAULT_LEFT_TURN_RADIUS,
+    "right_turn_radius": DEFAULT_RIGHT_TURN_RADIUS,
+    "rear_track": DEFAULT_REAR_TRACK,
+    "approach_offset": DEFAULT_APPROACH_OFFSET,
+    "safety_buffer": DEFAULT_SAFETY_BUFFER,
+    "vehicle_length": DEFAULT_VEHICLE_LENGTH,
+    "vehicle_width": DEFAULT_VEHICLE_WIDTH,
+}
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _as_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"1", "true", "yes", "y", "on"}:
+            return True
+        if token in {"0", "false", "no", "n", "off"}:
+            return False
+    raise HTTPException(status_code=422, detail="Invalid boolean value for automatic mode.")
+
+
+def _as_optional_algorithm(value: Any) -> str | None:
+    if value is None:
+        return None
+    token = str(value).strip().lower()
+    if token in {"legacy", "realistic"}:
+        return token
+    raise HTTPException(
+        status_code=422,
+        detail="Invalid algorithm mode. Use `legacy` or `realistic`.",
+    )
+
+
+def _as_optional_float(value: Any, field_name: str, min_value: float = 0.0) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail=f"Invalid numeric value for `{field_name}`."
+        ) from exc
+    if parsed < min_value:
+        raise HTTPException(
+            status_code=422, detail=f"`{field_name}` must be >= {min_value}."
+        )
+    return parsed
+
+
+def _build_automatic_settings_response() -> Dict[str, Any]:
+    return {
+        "automatic": _automatic_response_enabled,
+        "algorithm": _automatic_plan_settings["algorithm"],
+        "radius": _automatic_plan_settings["radius"],
+        "left_turn_radius": _automatic_plan_settings["left_turn_radius"],
+        "right_turn_radius": _automatic_plan_settings["right_turn_radius"],
+        "rear_track": _automatic_plan_settings["rear_track"],
+        "approach_offset": _automatic_plan_settings["approach_offset"],
+        "safety_buffer": _automatic_plan_settings["safety_buffer"],
+        "vehicle_length": _automatic_plan_settings["vehicle_length"],
+        "vehicle_width": _automatic_plan_settings["vehicle_width"],
+    }
+
+
+def _build_visiting_sequence(
+    path_order: List[int], obstacles: List[Dict[str, Any]]
+) -> List[int | str]:
+    visiting: List[int | str] = []
+    seen: set[int | str] = set()
+    for node in path_order:
+        if not isinstance(node, int) or node <= 0:
+            continue
+        obstacle_index = node - 1
+        if obstacle_index < 0 or obstacle_index >= len(obstacles):
+            continue
+        obstacle_id = obstacles[obstacle_index].get("id", obstacle_index + 1)
+        if isinstance(obstacle_id, (int, str)) and obstacle_id not in seen:
+            seen.add(obstacle_id)
+            visiting.append(obstacle_id)
+    return visiting
+
+
+def _forward_to_receiver(instructions: List[str], receiver_url: str) -> None:
+    payload = json.dumps({"instructions": instructions}).encode("utf-8")
+    req = request.Request(
+        receiver_url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=6):
+            return
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(
+            status_code=502, detail=f"Receiver HTTP {exc.code}: {detail or exc.reason}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502, detail=f"Unable to reach receiver: {exc}"
+        ) from exc
+
+
+def _refresh_plan_from_obstacles(
+    algorithm: str = DEFAULT_ALGORITHM,
+    radius: float = DEFAULT_RADIUS,
+    left_turn_radius: float = DEFAULT_LEFT_TURN_RADIUS,
+    right_turn_radius: float = DEFAULT_RIGHT_TURN_RADIUS,
+    rear_track: float = DEFAULT_REAR_TRACK,
+    approach_offset: float = DEFAULT_APPROACH_OFFSET,
+    safety_buffer: float = DEFAULT_SAFETY_BUFFER,
+    vehicle_length: float = DEFAULT_VEHICLE_LENGTH,
+    vehicle_width: float = DEFAULT_VEHICLE_WIDTH,
+) -> Dict[str, Any]:
+    global _instruction_version, _last_instruction_updated_at, _last_plan_signature, _last_plan_result
+    signature_payload = {
+        "obstacles": _obstacle_store,
+        "algorithm": algorithm,
+        "radius": radius,
+        "left_turn_radius": left_turn_radius,
+        "right_turn_radius": right_turn_radius,
+        "rear_track": rear_track,
+        "approach_offset": approach_offset,
+        "safety_buffer": safety_buffer,
+        "vehicle_length": vehicle_length,
+        "vehicle_width": vehicle_width,
+    }
+    signature = json.dumps(signature_payload, sort_keys=True, separators=(",", ":"))
+    if _last_plan_signature == signature and _last_plan_result is not None:
+        _last_instruction_store.clear()
+        _last_instruction_store.extend(_last_plan_result["instructions"])
+        _last_plan_meta["path_order"] = list(_last_plan_result["path_order"])
+        _last_plan_meta["unreachable_indices"] = list(_last_plan_result["unreachable_indices"])
+        _last_plan_meta["visiting"] = _build_visiting_sequence(
+            _last_plan_result["path_order"], _obstacle_store
+        )
+        return {
+            "path_order": list(_last_plan_result["path_order"]),
+            "commands": list(_last_plan_result["commands"]),
+            "instructions": list(_last_plan_result["instructions"]),
+            "unreachable_indices": list(_last_plan_result["unreachable_indices"]),
+        }
+
+    result = compute_plan_from_obstacles(
+        _obstacle_store,
+        algorithm=algorithm,
+        radius=radius,
+        left_turn_radius=left_turn_radius,
+        right_turn_radius=right_turn_radius,
+        rear_track=rear_track,
+        approach_offset=approach_offset,
+        safety_buffer=safety_buffer,
+        vehicle_length=vehicle_length,
+        vehicle_width=vehicle_width,
+    )
+
+    _last_instruction_store.clear()
+    _last_instruction_store.extend(result["instructions"])
+    _last_plan_meta["path_order"] = result["path_order"]
+    _last_plan_meta["unreachable_indices"] = result["unreachable_indices"]
+    _last_plan_meta["visiting"] = _build_visiting_sequence(
+        result["path_order"], _obstacle_store
+    )
+    _last_plan_signature = signature
+    _last_plan_result = {
+        "path_order": list(result["path_order"]),
+        "commands": list(result["commands"]),
+        "instructions": list(result["instructions"]),
+        "unreachable_indices": list(result["unreachable_indices"]),
+    }
+    _instruction_version += 1
+    _last_instruction_updated_at = _utc_now_iso()
+    return result
+
+
+@app.get("/health")
+def health() -> Dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/obstacles")
+def get_obstacles() -> Dict[str, Any]:
+    return {"data": _obstacle_store}
+
+
+@app.post("/obstacles")
+def set_obstacles(
+    payload: Dict[str, Any] | List[Dict[str, Any]],
+    auto: bool | None = None,
+    algorithm: str | None = None,
+    radius: float | None = None,
+    left_turn_radius: float | None = None,
+    right_turn_radius: float | None = None,
+    rear_track: float | None = None,
+    approach_offset: float | None = None,
+    safety_buffer: float | None = None,
+    vehicle_length: float | None = None,
+    vehicle_width: float | None = None,
+) -> Dict[str, Any]:
+    global _last_plan_signature, _last_plan_result
+    obstacles = _extract_obstacles(payload)
+    _obstacle_store.clear()
+    _obstacle_store.extend([item.model_dump() for item in obstacles])
+    _last_plan_signature = None
+    _last_plan_result = None
+
+    payload_auto: bool | None = None
+    payload_algorithm: str | None = None
+    payload_radius: float | None = None
+    payload_left_turn_radius: float | None = None
+    payload_right_turn_radius: float | None = None
+    payload_rear_track: float | None = None
+    payload_approach_offset: float | None = None
+    payload_safety_buffer: float | None = None
+    payload_vehicle_length: float | None = None
+    payload_vehicle_width: float | None = None
+
+    if isinstance(payload, dict):
+        payload_auto = _as_optional_bool(
+            payload.get("automatic", payload.get("auto"))
+        )
+        payload_algorithm = _as_optional_algorithm(
+            payload.get("algorithm", payload.get("mode"))
+        )
+        payload_radius = _as_optional_float(payload.get("radius"), "radius", min_value=0.0001)
+        payload_left_turn_radius = _as_optional_float(
+            payload.get("left_turn_radius", payload.get("leftTurnRadius")),
+            "left_turn_radius",
+            min_value=0.0001,
+        )
+        payload_right_turn_radius = _as_optional_float(
+            payload.get("right_turn_radius", payload.get("rightTurnRadius")),
+            "right_turn_radius",
+            min_value=0.0001,
+        )
+        payload_rear_track = _as_optional_float(
+            payload.get("rear_track", payload.get("rearTrack")),
+            "rear_track",
+            min_value=0.0001,
+        )
+        payload_approach_offset = _as_optional_float(
+            payload.get("approach_offset", payload.get("approachOffset")),
+            "approach_offset",
+            min_value=0.0001,
+        )
+        payload_safety_buffer = _as_optional_float(
+            payload.get("safety_buffer", payload.get("safetyBuffer")),
+            "safety_buffer",
+            min_value=0.0,
+        )
+        payload_vehicle_length = _as_optional_float(
+            payload.get("vehicle_length", payload.get("vehicleLength", payload.get("robot_length"))),
+            "vehicle_length",
+            min_value=0.0001,
+        )
+        payload_vehicle_width = _as_optional_float(
+            payload.get("vehicle_width", payload.get("vehicleWidth", payload.get("robot_width"))),
+            "vehicle_width",
+            min_value=0.0001,
+        )
+
+    effective_auto = _automatic_response_enabled
+    if payload_auto is not None:
+        effective_auto = payload_auto
+    if auto is not None:
+        effective_auto = auto
+
+    effective_algorithm = _automatic_plan_settings["algorithm"]
+    effective_radius = _automatic_plan_settings["radius"]
+    effective_left_turn_radius = _automatic_plan_settings["left_turn_radius"]
+    effective_right_turn_radius = _automatic_plan_settings["right_turn_radius"]
+    effective_rear_track = _automatic_plan_settings["rear_track"]
+    effective_approach_offset = _automatic_plan_settings["approach_offset"]
+    effective_safety_buffer = _automatic_plan_settings["safety_buffer"]
+    effective_vehicle_length = _automatic_plan_settings["vehicle_length"]
+    effective_vehicle_width = _automatic_plan_settings["vehicle_width"]
+
+    if payload_algorithm is not None:
+        effective_algorithm = payload_algorithm
+    if payload_radius is not None:
+        effective_radius = payload_radius
+    if payload_left_turn_radius is not None:
+        effective_left_turn_radius = payload_left_turn_radius
+    if payload_right_turn_radius is not None:
+        effective_right_turn_radius = payload_right_turn_radius
+    if payload_rear_track is not None:
+        effective_rear_track = payload_rear_track
+    if payload_approach_offset is not None:
+        effective_approach_offset = payload_approach_offset
+    if payload_safety_buffer is not None:
+        effective_safety_buffer = payload_safety_buffer
+    if payload_vehicle_length is not None:
+        effective_vehicle_length = payload_vehicle_length
+    if payload_vehicle_width is not None:
+        effective_vehicle_width = payload_vehicle_width
+
+    if algorithm is not None:
+        effective_algorithm = _as_optional_algorithm(algorithm) or effective_algorithm
+    if radius is not None:
+        effective_radius = radius
+    if left_turn_radius is not None:
+        effective_left_turn_radius = left_turn_radius
+    if right_turn_radius is not None:
+        effective_right_turn_radius = right_turn_radius
+    if rear_track is not None:
+        effective_rear_track = rear_track
+    if approach_offset is not None:
+        effective_approach_offset = approach_offset
+    if safety_buffer is not None:
+        effective_safety_buffer = safety_buffer
+    if vehicle_length is not None:
+        effective_vehicle_length = vehicle_length
+    if vehicle_width is not None:
+        effective_vehicle_width = vehicle_width
+
+    if effective_auto:
+        plan = _refresh_plan_from_obstacles(
+            algorithm=effective_algorithm,
+            radius=effective_radius,
+            left_turn_radius=effective_left_turn_radius,
+            right_turn_radius=effective_right_turn_radius,
+            rear_track=effective_rear_track,
+            approach_offset=effective_approach_offset,
+            safety_buffer=effective_safety_buffer,
+            vehicle_length=effective_vehicle_length,
+            vehicle_width=effective_vehicle_width,
+        )
+        visiting = _build_visiting_sequence(plan["path_order"], _obstacle_store)
+        return {
+            "status": "ok",
+            "count": len(_obstacle_store),
+            "data": _obstacle_store,
+            "instructions": plan["instructions"],
+            "visiting": visiting,
+        }
+
+    return {"status": "ok", "count": len(_obstacle_store), "data": _obstacle_store}
+
+
+@app.options("/obstacles")
+def options_obstacles() -> Response:
+    return Response(status_code=204)
+
+
+@app.get("/settings/automatic")
+def get_automatic_settings() -> Dict[str, Any]:
+    return _build_automatic_settings_response()
+
+
+@app.post("/settings/automatic")
+def set_automatic_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
+    global _automatic_response_enabled
+    automatic = _as_optional_bool(payload.get("automatic", payload.get("enabled")))
+    if automatic is not None:
+        _automatic_response_enabled = automatic
+
+    algorithm = _as_optional_algorithm(payload.get("algorithm", payload.get("mode")))
+    radius = _as_optional_float(payload.get("radius"), "radius", min_value=0.0001)
+    left_turn_radius = _as_optional_float(
+        payload.get("left_turn_radius", payload.get("leftTurnRadius")),
+        "left_turn_radius",
+        min_value=0.0001,
+    )
+    right_turn_radius = _as_optional_float(
+        payload.get("right_turn_radius", payload.get("rightTurnRadius")),
+        "right_turn_radius",
+        min_value=0.0001,
+    )
+    rear_track = _as_optional_float(
+        payload.get("rear_track", payload.get("rearTrack")),
+        "rear_track",
+        min_value=0.0001,
+    )
+    approach_offset = _as_optional_float(
+        payload.get("approach_offset", payload.get("approachOffset")),
+        "approach_offset",
+        min_value=0.0001,
+    )
+    safety_buffer = _as_optional_float(
+        payload.get("safety_buffer", payload.get("safetyBuffer")),
+        "safety_buffer",
+        min_value=0.0,
+    )
+    vehicle_length = _as_optional_float(
+        payload.get("vehicle_length", payload.get("vehicleLength", payload.get("robot_length"))),
+        "vehicle_length",
+        min_value=0.0001,
+    )
+    vehicle_width = _as_optional_float(
+        payload.get("vehicle_width", payload.get("vehicleWidth", payload.get("robot_width"))),
+        "vehicle_width",
+        min_value=0.0001,
+    )
+
+    if algorithm is not None:
+        _automatic_plan_settings["algorithm"] = algorithm
+    if radius is not None:
+        _automatic_plan_settings["radius"] = radius
+    if left_turn_radius is not None:
+        _automatic_plan_settings["left_turn_radius"] = left_turn_radius
+    if right_turn_radius is not None:
+        _automatic_plan_settings["right_turn_radius"] = right_turn_radius
+    if rear_track is not None:
+        _automatic_plan_settings["rear_track"] = rear_track
+    if approach_offset is not None:
+        _automatic_plan_settings["approach_offset"] = approach_offset
+    if safety_buffer is not None:
+        _automatic_plan_settings["safety_buffer"] = safety_buffer
+    if vehicle_length is not None:
+        _automatic_plan_settings["vehicle_length"] = vehicle_length
+    if vehicle_width is not None:
+        _automatic_plan_settings["vehicle_width"] = vehicle_width
+
+    return _build_automatic_settings_response()
+
+
+@app.options("/settings/automatic")
+def options_automatic_settings() -> Response:
+    return Response(status_code=204)
+
+
+@app.post("/algo-process")
+def receive_instructions(payload: Dict[str, Any]) -> Dict[str, Any]:
+    global _instruction_version, _last_instruction_updated_at
+    instructions = _extract_instruction_strings(payload)
+    _last_instruction_store.clear()
+    _last_instruction_store.extend(instructions)
+    _instruction_version += 1
+    _last_instruction_updated_at = _utc_now_iso()
+    return {"instructions": instructions}
+
+
+@app.options("/algo-process")
+def options_algo_process() -> Response:
+    return Response(status_code=204)
+
+
+@app.post("/instructions")
+def post_instructions(payload: Dict[str, Any]) -> Dict[str, Any]:
+    # Alias for clients that explicitly use POST /instructions.
+    return receive_instructions(payload)
+
+
+@app.options("/instructions")
+def options_instructions() -> Response:
+    return Response(status_code=204)
+
+
+@app.post("/relay/instructions")
+def relay_instructions(
+    payload: Dict[str, Any], receiver_url: str | None = None
+) -> Dict[str, Any]:
+    instructions = _extract_instruction_strings(payload)
+    # Keep local store in sync with what is forwarded.
+    receive_instructions({"instructions": instructions})
+    _forward_to_receiver(instructions, receiver_url or _default_receiver_url)
+    return {"instructions": instructions}
+
+
+@app.options("/relay/instructions")
+def options_relay_instructions() -> Response:
+    return Response(status_code=204)
+
+
+@app.get("/algo-process")
+def get_last_instructions(
+    sync_plan: bool = False,
+    algorithm: str = DEFAULT_ALGORITHM,
+    radius: float = DEFAULT_RADIUS,
+    left_turn_radius: float = DEFAULT_LEFT_TURN_RADIUS,
+    right_turn_radius: float = DEFAULT_RIGHT_TURN_RADIUS,
+    rear_track: float = DEFAULT_REAR_TRACK,
+    approach_offset: float = DEFAULT_APPROACH_OFFSET,
+    safety_buffer: float = DEFAULT_SAFETY_BUFFER,
+    vehicle_length: float = DEFAULT_VEHICLE_LENGTH,
+    vehicle_width: float = DEFAULT_VEHICLE_WIDTH,
+) -> Dict[str, Any]:
+    if sync_plan:
+        _refresh_plan_from_obstacles(
+            algorithm=_as_optional_algorithm(algorithm) or DEFAULT_ALGORITHM,
+            radius=radius,
+            left_turn_radius=left_turn_radius,
+            right_turn_radius=right_turn_radius,
+            rear_track=rear_track,
+            approach_offset=approach_offset,
+            safety_buffer=safety_buffer,
+            vehicle_length=vehicle_length,
+            vehicle_width=vehicle_width,
+        )
+    return {"instructions": _last_instruction_store}
+
+
+@app.get("/instructions")
+def get_instructions_for_robot(
+    sync_plan: bool = True,
+    algorithm: str = DEFAULT_ALGORITHM,
+    radius: float = DEFAULT_RADIUS,
+    left_turn_radius: float = DEFAULT_LEFT_TURN_RADIUS,
+    right_turn_radius: float = DEFAULT_RIGHT_TURN_RADIUS,
+    rear_track: float = DEFAULT_REAR_TRACK,
+    approach_offset: float = DEFAULT_APPROACH_OFFSET,
+    safety_buffer: float = DEFAULT_SAFETY_BUFFER,
+    vehicle_length: float = DEFAULT_VEHICLE_LENGTH,
+    vehicle_width: float = DEFAULT_VEHICLE_WIDTH,
+) -> Dict[str, Any]:
+    if sync_plan:
+        _refresh_plan_from_obstacles(
+            algorithm=_as_optional_algorithm(algorithm) or DEFAULT_ALGORITHM,
+            radius=radius,
+            left_turn_radius=left_turn_radius,
+            right_turn_radius=right_turn_radius,
+            rear_track=rear_track,
+            approach_offset=approach_offset,
+            safety_buffer=safety_buffer,
+            vehicle_length=vehicle_length,
+            vehicle_width=vehicle_width,
+        )
+
+    return {"instructions": _last_instruction_store}
