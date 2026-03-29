@@ -1,0 +1,58 @@
+#ifndef MOTOR_ENCODER_H
+#define MOTOR_ENCODER_H
+
+#include "main.h"
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
+#define ENCODER_PPR         11
+
+#define GEAR_RATIO          30
+
+#define COUNTS_PER_REV      (ENCODER_PPR * 4 * GEAR_RATIO)
+
+#define SAMPLE_PERIOD_MS    10
+
+#define MOTOR_PWM_MAX       999
+
+
+
+typedef enum {
+    MOTOR_A = 0,
+    MOTOR_B = 1,
+} Motor_ID_t;
+
+
+
+
+
+void Encoder_Init(void);
+void Motor_PWM_Init(void);
+void Encoder_Sampling_Timer_Init(void);
+
+void MotorA_Forward(uint16_t speed);
+void MotorA_Reverse(uint16_t speed);
+void MotorA_Stop(void);
+void MotorA_Brake(void);
+
+void MotorB_Forward(uint16_t speed);
+void MotorB_Reverse(uint16_t speed);
+void MotorB_Stop(void);
+void MotorB_Brake(void);
+
+void Motor_SetSpeed(Motor_ID_t motor, int16_t speed);
+
+int32_t Encoder_GetCount(Motor_ID_t motor);
+int32_t Encoder_GetDelta(Motor_ID_t motor);
+float   Encoder_GetRPM(Motor_ID_t motor);
+void    Encoder_Reset(Motor_ID_t motor);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

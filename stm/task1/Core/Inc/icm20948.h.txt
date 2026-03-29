@@ -1,0 +1,126 @@
+#ifndef ICM20948_H
+#define ICM20948_H
+
+#include "main.h"
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define ICM20948_I2C_ADDR       (0x68 << 1)
+
+#define REG_BANK_SEL            0x7F
+
+#define B0_WHO_AM_I             0x00
+#define B0_USER_CTRL            0x03
+#define B0_LP_CONFIG            0x05
+#define B0_PWR_MGMT_1           0x06
+#define B0_PWR_MGMT_2           0x07
+#define B0_INT_PIN_CFG          0x0F
+#define B0_INT_ENABLE           0x10
+#define B0_INT_ENABLE_1         0x11
+#define B0_INT_STATUS           0x19
+#define B0_INT_STATUS_1         0x1A
+
+#define B0_ACCEL_XOUT_H         0x2D
+#define B0_ACCEL_XOUT_L         0x2E
+#define B0_ACCEL_YOUT_H         0x2F
+#define B0_ACCEL_YOUT_L         0x30
+#define B0_ACCEL_ZOUT_H         0x31
+#define B0_ACCEL_ZOUT_L         0x32
+
+#define B0_GYRO_XOUT_H          0x33
+#define B0_GYRO_XOUT_L          0x34
+#define B0_GYRO_YOUT_H          0x35
+#define B0_GYRO_YOUT_L          0x36
+#define B0_GYRO_ZOUT_H          0x37
+#define B0_GYRO_ZOUT_L          0x38
+
+#define B0_TEMP_OUT_H           0x39
+#define B0_TEMP_OUT_L           0x3A
+
+#define B2_GYRO_SMPLRT_DIV      0x00
+#define B2_GYRO_CONFIG_1        0x01
+#define B2_ACCEL_SMPLRT_DIV_1   0x10
+#define B2_ACCEL_SMPLRT_DIV_2   0x11
+#define B2_ACCEL_CONFIG         0x14
+
+#define ICM20948_WHO_AM_I_VAL   0xEA
+
+#define PWR_MGMT_1_RESET        0x80
+#define PWR_MGMT_1_SLEEP        0x40
+#define PWR_MGMT_1_CLK_AUTO     0x01
+
+typedef enum {
+    GYRO_FS_250DPS  = 0x00,
+    GYRO_FS_500DPS  = 0x02,
+    GYRO_FS_1000DPS = 0x04,
+    GYRO_FS_2000DPS = 0x06,
+} ICM20948_GyroFS_t;
+
+typedef enum {
+    ACCEL_FS_2G     = 0x00,
+    ACCEL_FS_4G     = 0x02,
+    ACCEL_FS_8G     = 0x04,
+    ACCEL_FS_16G    = 0x06,
+} ICM20948_AccelFS_t;
+
+#define GYRO_SENSITIVITY_250DPS     131.0f
+#define GYRO_SENSITIVITY_500DPS      65.5f
+#define GYRO_SENSITIVITY_1000DPS     32.8f
+#define GYRO_SENSITIVITY_2000DPS     16.4f
+
+#define ACCEL_SENSITIVITY_2G     16384.0f
+#define ACCEL_SENSITIVITY_4G      8192.0f
+#define ACCEL_SENSITIVITY_8G      4096.0f
+#define ACCEL_SENSITIVITY_16G     2048.0f
+
+#define TEMP_SENSITIVITY        333.87f
+#define TEMP_OFFSET              21.0f
+
+
+typedef struct {
+    int16_t x;
+    int16_t y;
+    int16_t z;
+} ICM20948_RawData_t;
+
+typedef struct {
+    float x;
+    float y;
+    float z;
+} ICM20948_ScaledData_t;
+
+typedef struct {
+    ICM20948_RawData_t    accel_raw;
+    ICM20948_RawData_t    gyro_raw;
+    int16_t               temp_raw;
+
+    ICM20948_ScaledData_t accel_g;
+    ICM20948_ScaledData_t gyro_dps;
+    float                 temp_c;
+} ICM20948_Data_t;
+
+
+HAL_StatusTypeDef ICM20948_Init(I2C_HandleTypeDef *hi2c,
+                                ICM20948_GyroFS_t gyro_fs,
+                                ICM20948_AccelFS_t accel_fs);
+
+HAL_StatusTypeDef ICM20948_ReadAll(I2C_HandleTypeDef *hi2c,
+                                   ICM20948_Data_t *data);
+
+HAL_StatusTypeDef ICM20948_ReadAccel(I2C_HandleTypeDef *hi2c,
+                                     ICM20948_Data_t *data);
+
+HAL_StatusTypeDef ICM20948_ReadGyro(I2C_HandleTypeDef *hi2c,
+                                    ICM20948_Data_t *data);
+
+uint8_t ICM20948_WhoAmI(I2C_HandleTypeDef *hi2c);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

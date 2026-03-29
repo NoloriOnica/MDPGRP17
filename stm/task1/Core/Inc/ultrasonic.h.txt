@@ -1,0 +1,24 @@
+#ifndef ULTRASONIC_H
+#define ULTRASONIC_H
+
+#include "stm32f4xx_hal.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void Ultrasonic_Init(TIM_HandleTypeDef *htim_us, TIM_HandleTypeDef *htim_echo);
+
+void Ultrasonic_Process(void);
+
+float Ultrasonic_GetDistance_cm(void);
+
+float Ultrasonic_GetEcho_us(void);
+
+void Ultrasonic_CaptureCallback(TIM_HandleTypeDef *htim);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

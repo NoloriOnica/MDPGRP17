@@ -1,0 +1,42 @@
+#ifndef IMU_FUSION_H
+#define IMU_FUSION_H
+
+#include "main.h"
+#include "icm20948.h"
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
+bool IMU_Fusion_Init(I2C_HandleTypeDef *hi2c);
+
+void IMU_Fusion_SetGyroBias(uint16_t samples);
+
+
+void IMU_Fusion_Update(void);
+
+
+float IMU_Fusion_GetYaw(void);
+
+float IMU_Fusion_GetPitch(void);
+
+float IMU_Fusion_GetRoll(void);
+
+float IMU_Fusion_GetGyroZ(void);
+
+const ICM20948_Data_t* IMU_Fusion_GetRawData(void);
+
+float IMU_Fusion_GetGyroBias(void);
+
+
+void IMU_Fusion_ResetYaw(void);
+
+void IMU_Fusion_SetYaw(float yaw);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
