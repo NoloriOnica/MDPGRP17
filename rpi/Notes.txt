@@ -1,0 +1,15 @@
+# Workflows
+ANDROID     <= robot position and obstacles =>      PI
+PI     =obstacles=>    ALGO    =optimal path=>      PI
+PI     =move cmds=>    STM    
+CAM    =detect image=>  PI     =image reg result=> ANDROID
+
+
+# Android MAC
+48:61:EE:2A:AA:34       Galaxy Tab A7 Lite
+
+# Bluetooth setup
+sudo systemctl start rfcomm
+sudo hciconfig hci0 piscan ////make pi a bluetooth server
+sudo rfcomm listen /dev/rfcomm0 1 ////set up listener
+

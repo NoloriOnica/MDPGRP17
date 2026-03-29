@@ -1,0 +1,178 @@
+[
+  {
+    "type": "RIGHT",
+    "value": 120
+  },
+  {
+    "type": "FORWARD",
+    "value": 28.7
+  },
+  {
+    "type": "LEFT",
+    "value": 210
+  },
+  {
+    "type": "READ",
+    "value": 500
+  },
+  {
+    "type": "PAUSE",
+    "value": 500
+  },
+  {
+    "type": "REVERSE_LEFT",
+    "value": 29
+  },
+  {
+    "type": "RIGHT",
+    "value": 44
+  },
+  {
+    "type": "FORWARD",
+    "value": 28.8
+  },
+  {
+    "type": "LEFT",
+    "value": 71
+  },
+  {
+    "type": "READ",
+    "value": 500
+  },
+  {
+    "type": "PAUSE",
+    "value": 500
+  },
+  {
+    "type": "REVERSE_LEFT",
+    "value": 14
+  },
+  {
+    "type": "RIGHT",
+    "value": 103
+  },
+  {
+    "type": "FORWARD",
+    "value": 22.6
+  },
+  {
+    "type": "LEFT",
+    "value": 27
+  },
+  {
+    "type": "READ",
+    "value": 500
+  },
+  {
+    "type": "PAUSE",
+    "value": 500
+  },
+  {
+    "type": "REVERSE_LEFT",
+    "value": 27
+  },
+  {
+    "type": "REVERSE_STRAIGHT",
+    "value": 10.7
+  },
+  {
+    "type": "LEFT",
+    "value": 267
+  },
+  {
+    "type": "FORWARD",
+    "value": 56.9
+  },
+  {
+    "type": "LEFT",
+    "value": 30
+  },
+  {
+    "type": "READ",
+    "value": 500
+  },
+  {
+    "type": "PAUSE",
+    "value": 500
+  },
+  {
+    "type": "REVERSE_LEFT",
+    "value": 30
+  },
+  {
+    "type": "REVERSE_STRAIGHT",
+    "value": 14.5
+  },
+  {
+    "type": "LEFT",
+    "value": 73
+  },
+  {
+    "type": "FORWARD",
+    "value": 47.5
+  },
+  {
+    "type": "RIGHT",
+    "value": 43
+  },
+  {
+    "type": "READ",
+    "value": 500
+  },
+  {
+    "type": "PAUSE",
+    "value": 500
+  },
+  {
+    "type": "REVERSE_RIGHT",
+    "value": 43
+  },
+  {
+    "type": "REVERSE_STRAIGHT",
+    "value": 15
+  },
+  {
+    "type": "RIGHT",
+    "value": 123
+  },
+  {
+    "type": "FORWARD",
+    "value": 7.3
+  },
+  {
+    "type": "LEFT",
+    "value": 80
+  },
+  {
+    "type": "READ",
+    "value": 500
+  },
+  {
+    "type": "PAUSE",
+    "value": 500
+  },
+  {
+    "type": "REVERSE_LEFT",
+    "value": 29
+  },
+  {
+    "type": "RIGHT",
+    "value": 94
+  },
+  {
+    "type": "FORWARD",
+    "value": 27.6
+  },
+  {
+    "type": "LEFT",
+    "value": 122
+  },
+  {
+    "type": "READ",
+    "value": 500
+  },
+  {
+    "type": "PAUSE",
+    "value": 500
+  }
+]
