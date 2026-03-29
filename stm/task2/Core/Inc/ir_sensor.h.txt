@@ -1,0 +1,28 @@
+#ifndef IR_SENSOR_H
+#define IR_SENSOR_H
+
+#include "stm32f4xx_hal.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
+typedef enum {
+    IR_LEFT = 0,
+    IR_RIGHT,
+    IR_COUNT
+} IR_Sensor_ID_t;
+
+
+void IR_Sensor_Init(ADC_HandleTypeDef *hadc);
+
+float IR_Sensor_GetDistance_cm(IR_Sensor_ID_t sensor);
+
+uint16_t IR_Sensor_GetRaw(IR_Sensor_ID_t sensor);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

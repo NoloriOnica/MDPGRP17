@@ -1,0 +1,33 @@
+#ifndef SERVO_H
+#define SERVO_H
+
+#include "main.h"
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define SERVO_TICK_MIN      25
+#define SERVO_TICK_CENTER   61
+#define SERVO_TICK_MAX      125
+
+#define SERVO_STEER_MIN     33
+#define SERVO_STEER_MAX     120
+
+
+void Servo_Init(void);
+
+void Servo_SetTick(uint16_t tick);
+
+void Servo_SetAngle(float angle);
+
+void Servo_SetSteering(float steer);
+
+uint16_t Servo_GetTick(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
