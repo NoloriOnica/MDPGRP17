@@ -1,0 +1,113 @@
+#include "ultrasonic.h"
+
+
+#define TRIG_PORT       GPIOB
+#define TRIG_PIN        GPIO_PIN_15
+
+#define ECHO_PORT       GPIOB
+#define ECHO_PIN        GPIO_PIN_14
+
+#define SPEED_OF_SOUND_CM_PER_US  0.0343f
+
+#define US_CYCLE_MS     60
+
+
+typedef enum {
+    US_IDLE,
+    US_TRIGGER,
+    US_WAIT_ECHO,
+} US_State_t;
+
+
+static TIM_HandleTypeDef *htim_delay = NULL;
+static TIM_HandleTypeDef *htim_capture = NULL;
+
+static volatile uint32_t tc1 = 0;
+static volatile uint32_t tc2 = 0;
+static volatile float    echo_us = 0.0f;
+
+static US_State_t us_state = US_IDLE;
+static uint32_t   us_tick  = 0;
+
+
+
+void Ultrasonic_Init(TIM_HandleTypeDef *htim_us, TIM_HandleTypeDef *htim_echo)
+{
+    htim_delay   = htim_us;
+    htim_capture = htim_echo;
+
+    HAL_TIM_Base_Start(htim_delay);
+
+    HAL_TIM_IC_Start_IT(htim_capture, TIM_CHANNEL_1);
+
+    HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_RESET);
+
+    us_state = US_IDLE;
+    us_tick  = HAL_GetTick();
+}
+
+
+
+void Ultrasonic_Process(void)
+{
+    switch (us_state)
+    {
+        case US_IDLE:
+            if (HAL_GetTick() - us_tick >= US_CYCLE_MS)
+            {
+                HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_SET);
+                __HAL_TIM_SET_COUNTER(htim_delay, 0);
+                while (__HAL_TIM_GET_COUNTER(htim_delay) < 10);
+                HAL_GPIO_WritePin(TRIG_PORT, TRIG_PIN, GPIO_PIN_RESET);
+
+                us_tick  = HAL_GetTick();
+                us_state = US_WAIT_ECHO;
+            }
+            break;
+
+        case US_WAIT_ECHO:
+            if (HAL_GetTick() - us_tick >= 40)
+            {
+                us_state = US_IDLE;
+                us_tick  = HAL_GetTick();
+            }
+            break;
+
+        default:
+            us_state = US_IDLE;
+            break;
+    }
+}
+
+
+
+float Ultrasonic_GetDistance_cm(void)
+{
+    return (echo_us * SPEED_OF_SOUND_CM_PER_US) / 2.0f;
+}
+
+float Ultrasonic_GetEcho_us(void)
+{
+    return echo_us;
+}
+
+
+
+void Ultrasonic_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance != htim_capture->Instance)
+        return;
+
+    if (HAL_GPIO_ReadPin(ECHO_PORT, ECHO_PIN) == GPIO_PIN_SET)
+    {
+        tc1 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+    }
+    else
+    {
+        tc2 = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+        if (tc2 > tc1)
+            echo_us = (float)(tc2 - tc1);
+        else
+            echo_us = (float)((65536 - tc1) + tc2);
+    }
+}

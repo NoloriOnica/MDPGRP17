@@ -1,0 +1,163 @@
+#include "imu_fusion.h"
+#include "kalman.h"
+#include <math.h>
+
+#define RAD_TO_DEG  57.29577951f
+#define IMU_DT      0.01f
+
+
+static I2C_HandleTypeDef *fusion_hi2c = NULL;
+static ICM20948_Data_t    imu_data;
+
+static Kalman_t kalman_pitch;
+static Kalman_t kalman_roll;
+
+static float filtered_pitch = 0.0f;
+static float filtered_roll  = 0.0f;
+static float filtered_yaw   = 0.0f;
+
+static float gyro_z_bias = 0.0f;
+
+static float latest_gyro_z = 0.0f;
+
+
+
+static float Accel_GetPitch(const ICM20948_Data_t *d)
+{
+    return atan2f(d->accel_g.y, d->accel_g.z) * RAD_TO_DEG;
+}
+
+static float Accel_GetRoll(const ICM20948_Data_t *d)
+{
+    return -atan2f(d->accel_g.x, d->accel_g.z) * RAD_TO_DEG;
+}
+
+
+
+bool IMU_Fusion_Init(I2C_HandleTypeDef *hi2c)
+{
+    fusion_hi2c = hi2c;
+
+    if (ICM20948_Init(hi2c, GYRO_FS_500DPS, ACCEL_FS_4G) != HAL_OK)
+        return false;
+
+    Kalman_Init(&kalman_pitch);
+    Kalman_Init(&kalman_roll);
+
+    HAL_Delay(100);
+
+    if (ICM20948_ReadAll(hi2c, &imu_data) == HAL_OK)
+    {
+        float init_pitch = Accel_GetPitch(&imu_data);
+        float init_roll  = Accel_GetRoll(&imu_data);
+
+        Kalman_SetAngle(&kalman_pitch, init_pitch);
+        Kalman_SetAngle(&kalman_roll,  init_roll);
+
+        filtered_pitch = init_pitch;
+        filtered_roll  = init_roll;
+    }
+
+    filtered_yaw = 0.0f;
+    gyro_z_bias = 0.0f;
+
+    return true;
+}
+
+
+
+void IMU_Fusion_SetGyroBias(uint16_t samples)
+{
+    if (fusion_hi2c == NULL) return;
+
+    float total = 0.0f;
+
+    for (uint16_t i = 0; i < samples; i++)
+    {
+        if (ICM20948_ReadAll(fusion_hi2c, &imu_data) == HAL_OK)
+        {
+            total += (-imu_data.gyro_dps.z);
+        }
+        HAL_Delay(2);
+    }
+
+    gyro_z_bias = total / (float)samples;
+}
+
+
+
+static uint32_t last_update_tick = 0;
+
+void IMU_Fusion_Update(void)
+{
+    if (fusion_hi2c == NULL) return;
+
+    uint32_t now = HAL_GetTick();
+    float dt;
+    
+    if (last_update_tick == 0)
+    {
+        dt = IMU_DT;
+    }
+    else
+    {
+        dt = (now - last_update_tick) / 1000.0f;
+        
+        if (dt < 0.001f) dt = 0.001f;
+        if (dt > 0.1f)   dt = 0.1f;
+    }
+    last_update_tick = now;
+
+    if (ICM20948_ReadAll(fusion_hi2c, &imu_data) != HAL_OK)
+        return;
+
+    float accel_pitch = Accel_GetPitch(&imu_data);
+    float accel_roll  = Accel_GetRoll(&imu_data);
+
+    float gyro_pitch_rate = -imu_data.gyro_dps.x;
+    float gyro_roll_rate  = -imu_data.gyro_dps.y;
+
+    filtered_pitch = Kalman_Update(&kalman_pitch, accel_pitch, gyro_pitch_rate, dt);
+    filtered_roll  = Kalman_Update(&kalman_roll,  accel_roll,  gyro_roll_rate,  dt);
+
+    
+    float raw_gyro_z = -imu_data.gyro_dps.z;
+    
+    float gyro_yaw_rate = raw_gyro_z - gyro_z_bias;
+    
+    filtered_yaw += gyro_yaw_rate * dt;
+
+    if (filtered_yaw > 180.0f)  filtered_yaw -= 360.0f;
+    if (filtered_yaw < -180.0f) filtered_yaw += 360.0f;
+
+    latest_gyro_z = gyro_yaw_rate;
+}
+
+
+
+float IMU_Fusion_GetYaw(void)   { return filtered_yaw;   }
+float IMU_Fusion_GetPitch(void) { return filtered_pitch; }
+float IMU_Fusion_GetRoll(void)  { return filtered_roll;  }
+float IMU_Fusion_GetGyroZ(void) { return latest_gyro_z;  }
+
+const ICM20948_Data_t* IMU_Fusion_GetRawData(void)
+{
+    return &imu_data;
+}
+
+
+
+void IMU_Fusion_ResetYaw(void)
+{
+    filtered_yaw = 0.0f;
+}
+
+void IMU_Fusion_SetYaw(float yaw)
+{
+    filtered_yaw = yaw;
+}
+
+float IMU_Fusion_GetGyroBias(void)
+{
+    return gyro_z_bias;
+}

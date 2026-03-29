@@ -1,0 +1,61 @@
+#include "ir_sensor.h"
+
+
+#define ADC_VREF        3.3f
+#define ADC_MAX_VAL     4095.0f
+
+#define COEFF_A         27.0f
+#define COEFF_B         0.1f
+#define COEFF_C         2.0f
+
+#define DIST_MIN_CM     4.0f
+#define DIST_MAX_CM     80.0f
+
+
+static uint16_t adc_buf[IR_COUNT];
+
+
+
+static float RawToDistance(uint16_t raw)
+{
+    float voltage = (float)raw * ADC_VREF / ADC_MAX_VAL;
+
+    if (voltage <= COEFF_B + 0.01f)
+        return 0.0f;
+
+    float dist = COEFF_A / (voltage - COEFF_B) - COEFF_C;
+
+    if (dist < DIST_MIN_CM)
+        return 0.0f;
+    else if (dist > DIST_MAX_CM)
+        return -1.0f;
+
+    return dist;
+}
+
+
+
+void IR_Sensor_Init(ADC_HandleTypeDef *hadc)
+{
+    HAL_ADC_Start_DMA(hadc, (uint32_t *)adc_buf, IR_COUNT);
+}
+
+
+
+float IR_Sensor_GetDistance_cm(IR_Sensor_ID_t sensor)
+{
+    if (sensor >= IR_COUNT)
+        return 0.0f;
+
+    return RawToDistance(adc_buf[sensor]);
+}
+
+
+
+uint16_t IR_Sensor_GetRaw(IR_Sensor_ID_t sensor)
+{
+    if (sensor >= IR_COUNT)
+        return 0;
+
+    return adc_buf[sensor];
+}
