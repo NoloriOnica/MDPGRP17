@@ -4,24 +4,15 @@ from communication.imgReg import *
 import time
 
 cmd_set_1 = ["BACKLEFT 45","RIGHT 45","FORWARD 250","LEFT 90","BACKWARD 60","LEFT 90", "APPROACH 25"]
-# ["RIGHT 45","LEFT 45","LEFT 45","BACKWARD 250","BACKRIGHT 50"]
 
-# ["RIGHT 45","LEFT 45","LEFT 45","BACKWARD 250","BACKRIGHT 50"]
-
-# ["RIGHT 90","LEFT 90","BACKWARD 250","LEFT 90"]
-
-# ["BACKLEFT 45","RIGHT 45","FORWARD 250","LEFT 90","BACKWARD 60","LEFT 90", "APPROACH 25"]
 IMG_DIR = "/home/pi/Documents/checklist_items"
-#test_images = ["/home/pi/Documents/test_files/images/testImg.jpg","/home/pi/Documents/test_files/images/testImg.jpg","/home/pi/Documents/test_files/images/testImg.jpg","/home/pi/Documents/test_files/images/F.jpg"]
 
 stm_conn = STMLink()
 stm_conn.connect()
 picamObj = startCamera()
 
 
-#print("APPROACH 25")
-
-for index in range(1,5): # TODO: Change to range(4) after camera fixed  
+for index in range(1,5): 
     stm_conn.send("APPROACH 25")
     while True:
         recv_msg = stm_conn.recv()
@@ -49,15 +40,3 @@ for index in range(1,5): # TODO: Change to range(4) after camera fixed
                 print(recv_msg)
                 if recv_msg.split(" ")[0] == "DONE":
                     break
-    
-        
-# while True:
-#     instr = input("Insert CMD (Send 'S' to stop): ")
-#     instr += "\n"
-    
-#     if instr == 'S':
-#         stm_conn.disconnect()
-#         break
-    
-#     stm_conn.send(instr)
-#     stm_conn.recv()

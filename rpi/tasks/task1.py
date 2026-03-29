@@ -69,8 +69,6 @@ print("All multiprocesses started")
 
 
 
-
-
 ### Android -> RPI -> Algo -> RPI ###
 
 # Listening for obstacles from Android
@@ -87,19 +85,13 @@ while True and mutex == 0:
         if recv_msg[0:3] == "OBS":
             ## ACTUAL
             print("Waiting for Algo Response")
-            #input to ALGO
-            msg_for_algo = parse_obs_string(recv_msg)
-            print(msg_for_algo)
-
-
+            msg_for_algo = parse_to_algo(recv_msg)
             resp = getSTMCommands(msg_for_algo)
-            print()
-            print()
-            print(resp)
             cmds_for_stm = resp["instructions"]
-            obs_seq = resp["visiting_sequence"]
+            obs_seq = resp["visiting"]
             for obs in obs_seq:
                 obs_queue.put(obs)
+
             ## FOR TEST
             ## cmds_for_stm = ["APPROACH 25"] # TO REMOVE
             # TODO: need get sequence of which blocks are approached first

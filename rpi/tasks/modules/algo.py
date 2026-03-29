@@ -1,7 +1,6 @@
 from constant.settings import ALGO_IP, ALGO_PORT
 import re
 import requests
-import time
 
 
 def parse_to_algo(s):
@@ -28,35 +27,9 @@ def parse_to_algo(s):
 
 def getSTMCommands(post_body_to_algo_server):
     try:
-        start_time = time.perf_counter()
-
-        response = requests.post(
-            f'http://{ALGO_IP}:{ALGO_PORT}/pathfinding/',
-            json=post_body_to_algo_server,
-            timeout=100000
-        )
-
-        response.raise_for_status()
-        cmds_for_stm = response.json()
-
-        print("From getSTMCommands:", cmds_for_stm)
-
-        end_time = time.perf_counter()
-        elapsed_time = end_time - start_time
-        print(f"Time taken to get algo response: {elapsed_time:.4f} seconds")
-
-        return cmds_for_stm
-
+        cmds_for_stm = requests.post(f'http://{ALGO_IP}:{ALGO_PORT}/obstacles', json={'data': post_body_to_algo_server}, timeout=600).json()
     except requests.RequestException as e:
         print(f"Error receiving commands from Algo Server: {e}")
-        return None
-    
-
-# android_output = "OBS|{id: 0,x: 7,y: 7,d: N}{id: 1,x: 14,y: 8,d: N}{id: 2,x: 7,y: 12,d: N}{id: 3,x: 15,y: 4,d: N}{id: 4,x: 10,y: 4,d: N}{id: 5,x: 16,y: 11,d: N}{id: 6,x: 4,y: 10,d: N}{id: 7,x: 15,y: 11,d: N}"
-
-
-# result = parse_to_algo(android_output)
-# print(result)
-# response = requests.post(f'http://{ALGO_IP}:{ALGO_PORT}/obstacles', json={'data': result})
-# print(response.json())
+        
+    return cmds_for_stm
 

@@ -33,17 +33,3 @@ while True:
     stm_conn.recv()
 
 
-# ser.write(resp.encode())
-# print(f'CMD SENT:{resp}')
-        
-# for _ in range(2):
-#     line = ser.readline().decode("utf-8", errors="ignore").strip()
-#     if line:
-#         print("recv:", line)
-
-
-# # Pass command to stm
-# stm_conn.connect()
-# stm_conn.send_cmd(b"FORWARD 500")
-
-
