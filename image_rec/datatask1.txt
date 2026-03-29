@@ -1,0 +1,14 @@
+path: C:/Users/James Megadyanto/Documents/sc2079 yolov11/Running on Asus Laptop 2.v2i.yolov11
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 31
+names: ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'Bullseye', 'C', 'D', 'Down', 'E', 'F', 'G', 'H', 'Left', 'Right', 'S', 'Stop', 'T', 'U', 'Up', 'V', 'W', 'X', 'Y', 'Z']
+
+#roboflow:
+  #workspace: sc2079-jdgir
+  #project: running-on-asus-laptop-2-isvk3
+  #version: 2
+  #license: CC BY 4.0
+  #url: https://app.roboflow.com/sc2079-jdgir/running-on-asus-laptop-2-isvk3/2

@@ -1,0 +1,71 @@
+from pathlib import Path
+import shutil
+
+ROOT = Path(__file__).resolve().parent
+TARGET = ROOT / "filtered_left_right_seg"
+
+LEFT_OLD_ID = 22
+RIGHT_OLD_ID = 25
+
+CLASS_MAP = {
+    LEFT_OLD_ID: 0,   # left
+    RIGHT_OLD_ID: 1   # right
+}
+
+splits = ["train", "valid", "test"]
+
+for split in splits:
+    src_img = ROOT / split / "images"
+    src_lbl = ROOT / split / "labels"
+
+    dst_img = TARGET / split / "images"
+    dst_lbl = TARGET / split / "labels"
+
+    dst_img.mkdir(parents=True, exist_ok=True)
+    dst_lbl.mkdir(parents=True, exist_ok=True)
+
+    for label_file in src_lbl.glob("*.txt"):
+        kept_lines = []
+
+        with open(label_file, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split()
+                if not parts:
+                    continue
+
+                old_class = int(parts[0])
+                if old_class in CLASS_MAP:
+                    parts[0] = str(CLASS_MAP[old_class])
+                    kept_lines.append(" ".join(parts))
+
+        if kept_lines:
+            with open(dst_lbl / label_file.name, "w", encoding="utf-8") as f:
+                f.write("\n".join(kept_lines))
+
+            image_stem = label_file.stem
+            found = False
+            for ext in [".jpg", ".jpeg", ".png"]:
+                img_path = src_img / f"{image_stem}{ext}"
+                if img_path.exists():
+                    shutil.copy2(img_path, dst_img / img_path.name)
+                    found = True
+                    break
+
+            if not found:
+                print(f"Image not found for {label_file.name}")
+
+yaml_text = f"""path: {TARGET.as_posix()}
+train: train/images
+val: valid/images
+test: test/images
+
+names:
+  0: left
+  1: right
+"""
+
+with open(TARGET / "data.yaml", "w", encoding="utf-8") as f:
+    f.write(yaml_text)
+
+print("Done.")
+print("Filtered dataset saved to:", TARGET)
